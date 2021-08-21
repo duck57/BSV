@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 import io
 from typing import NamedTuple, Generator
 
@@ -15,23 +14,6 @@ NAMES_DICT = {
     RECORD: "Record",
     UNIT: "Unit",
 }
-
-
-def generate_test_string() -> str:
-    """
-    :return: a test string with a bunch of non-printable characters
-    """
-    o = "File separator" + FILE
-    o += "Group separator" + GROUP
-    o += "Record separator" + RECORD
-    o += "Unit separator" + UNIT
-    o += "Newline\n"
-    o += "Tab (horizontal)\t"
-    o += "Tab (vertical)\v"
-    o += "Bell\a\x07"
-    o += "Carriage return\r"
-    o += "End of file"
-    return o
 
 
 class RawLine(NamedTuple):
@@ -93,19 +75,3 @@ def read_file_into_lines(
 
 class Reader:
     pass
-
-
-def test_reading_file_into_lines(f="../../test_BSV_files/test_string.txt"):
-    """
-    Tests reading a file into lines with a very short reading buffer
-    The short buffer exercises how the loader handles lines that span reads
-    """
-    with open(f) as opened_file:
-        for z in read_file_into_lines(
-            opened_file, 40  # comment out to debug with the default buffer
-        ):
-            print(z)
-
-
-if __name__ == "__main__":
-    test_reading_file_into_lines()
