@@ -95,7 +95,7 @@ class Reader:
     pass
 
 
-def test_reading_file_into_lines(f="../test_BSV_files/test_string.txt"):
+def test_reading_file_into_lines(f="../../test_BSV_files/test_string.txt"):
     """
     Tests reading a file into lines with a very short reading buffer
     The short buffer exercises how the loader handles lines that span reads

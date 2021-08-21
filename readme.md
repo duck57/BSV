@@ -241,6 +241,12 @@ Output data validation should probably be done by your preferred dataclass or OR
 
 # Repository structure
 
-* `readme.md`: this document with the specification, about, and project information
-* `imp-*/`: folders containing implementations of this spec in different languages
+* `readme.md`: this document with the specification, about, and project
+  information
+* `implementions/`: folders containing implementations of this spec in
+  different languages.  If the source and test folders are separate, create
+  them as `Lang-src` and `Lang-tst`.
 * `test_BSV_files/`: test case files to be shared when testing implementations
+
+Please clean up any junk that's not already covered by .gitignore by adding new
+rules there.
