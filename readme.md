@@ -1,6 +1,6 @@
 # Better Separated Values
 
-An improvement to CSV.  Currently version 0.0.3
+An improvement to CSV.  Current version = 0.0.3
 
 ## Inspiration
 
@@ -22,18 +22,19 @@ in the same field without implementing a one-off custom delimiter.
 
 ### 1.0
 
-* No further format changes are proposed after robust outisde feedback
+* No further format changes are proposed after robust outside feedback
 
 # Semi-formal specification
 
 ## Notes
 
 * Encoding in these documents is assumed to be UTF-8
-* "Record" and "row" are used interchangably throughout.  Do remember that
-  these are delimted with `\x1D` and not a newline.
+* "Record" and "row" are used interchangeably throughout.  Do remember that
+  these are delimited with `\x1D` and not a newline.
 * Whether to trim trailing & leading whitespace from string fields is left to
   the discretion of the client.  Libraries ought to be happy to serve either
 options.  Non-string fields should strip such whitespace.
+* All requirements for "unique names" are to be treated as case-insensitive.
 
 ## Reserved delimiters
 
@@ -77,6 +78,9 @@ How should multiple tables with the same name (case-insensitive?) be handled?
 3. Leave this as deliberately unspecified/undefined behaviour that lets
    incidental implementation details shine through
 
+Python OO-implementation leans toward option 2. Will need to try Elixir &
+Clojure implementations to see how they would handle this situation.
+
 ## Table Header
 
 table\_name[`\x1e`options string]
@@ -84,7 +88,7 @@ table\_name[`\x1e`options string]
 ### Options String
 
 One-character flags that set up the integrity options for the table as a whole.
-Default for all these is no.  Order within this string is not important?
+Defaults are all no.  Order within this string is not important?
 
 ### Allow extra fields? `X`
 
@@ -122,13 +126,13 @@ In the general format of `X9t`.
 that a single value is required in the field.  `*` allows any number of values.
 If you, for example, need to have between 3 nad 7 values, make four columns:
 three of which are `0` and the fourth as `4`. 
-* `t` is an optional flag whose presense means that a tab is used to separate
+* `t` is an optional flag whose presence means that a tab is used to separate
   values within a field rather than the unit separator.  This flag is not valid
 on multi-response string fields.
 
 #### TODO before 0.1.x
 
-* Specify both a minumum and maximum value count?
+* Specify both a minimum and maximum value count?
 * Allow specified maximum value counts over 9?
 * Switch meanings of `0` and `*`?
 
@@ -142,7 +146,7 @@ The default format for a column (including spare fields) is `S*`.
 
 #### Decimal: `F`
 
-Stands for float, which is what it will presumed to be stored as in the
+Stands for float, which is what it will presume to be stored as in the
 client's RAM.
 
 #### Fraction: `R`
@@ -151,7 +155,7 @@ Fractions without a denominator will be assumed to be over 1.  Clients should
 store both the numerator and denominator as integers if possible and otherwise
 store them both as floats.
 
-TODO: or should the integer/float conversion be separate for the numberator &
+TODO: or should the integer/float conversion be separate for the numerator &
 denominator?
 
 #### Date: `D`
@@ -189,7 +193,7 @@ minutes are fine-grained as necessary?
 
 ##### Day: `T`
 
-`t+1` means to incriment the day by 1.
+`t+1` means to increment the day by 1.
 
 ##### Week: `W`
 
@@ -210,7 +214,7 @@ Should this be unspecified?
 
 First, some examples:
 
-1. C0`\x1F`3 BHD _one required Bahraini dinar amount_
+1. C0`\x1F`3 BHD _one required Bahrain dinar amount_
 2. C\*t`\x1F`2 USD _multiple US dollar amounts separated by tabs_
 3. C2`\x1F`8 _up to 2 amounts of unspecified currency with 8 digits after the
    decimal separated by the unit separator_
@@ -235,3 +239,8 @@ loading files with malformed rows or to abort with an error.
 
 Output data validation should probably be done by your preferred dataclass or ORM.
 
+# Repository structure
+
+* `readme.md`: this document with the specification, about, and project information
+* `imp-*/`: folders containing implementations of this spec in different languages
+* `test_BSV_files/`: test case files to be shared when testing implementations

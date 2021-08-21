@@ -1,0 +1,10 @@
+File separator
+Group separator
+Record separator
+Unit separatorNewline
+
+Tab (horizontal)	Tab (vertical)
+BellCarriage return
+End of file
+File separator2Group separator2Record separator2Unit separator2Newline2
+Tab (horizontal)	Tab (vertical)BellCarriage returnEnd of file for real
