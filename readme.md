@@ -1,6 +1,6 @@
 # Better Separated Values
 
-An improvement to CSV.  Current version = 0.0.3
+An improvement to CSV.  Current version = 0.0.3 ^ 0/1
 
 ## Inspiration
 
@@ -11,6 +11,13 @@ appear in real data.  The other improvement is an ability to store multiple valu
 in the same field without implementing a one-off custom delimiter.
 
 ## Project Milestones & Goals
+
+### Pre-1.0 versioning
+
+* In 0.0.x, each patch may be a major version in a post-1.0 semver release
+* Likewise for 0.y.x for each y-increment.
+* The ` ^ a/b` is the number of relatively-complete implementations and the
+  number of heavily in-progress implementations
 
 ### 0.1.x
 
@@ -23,6 +30,7 @@ in the same field without implementing a one-off custom delimiter.
 ### 1.0
 
 * No further format changes are proposed after robust outside feedback
+* The implementations should probably be split into separate projects at this point.
 
 # Semi-formal specification
 
@@ -56,6 +64,10 @@ separates fields within a row.  This is in accordance with the MARC21 format.
 
 When referring to these values within the rest of this specification, the seq
 code or `\x` hex value will be used.
+
+Furthermore, a newline character may optionally be placed after the FILE or
+GROUP separators for ease of editing in text editors.  This newline will
+promptly be stripped and ignored when the file is loaded.
 
 ## General Table Structure
 
@@ -221,9 +233,11 @@ First, some examples:
 
 Note how currency fields require an additional `\x1F` followed by an integer.
 This integer is to indicate the number of decimal places of precision in which
-the currency should be stored.  Optionally, the precision may be followed by a
-space and an ISO 4217-like currency code.  In a field with multiple values,
-each individual value _may_ choose to include the same space and currency code.
+the currency should be stored. Optionally, the precision may be followed by a
+space and an ISO 4217-like currency code. In a field with multiple values, each
+individual value _may_ choose to include a space and currency code further
+followed by another optional space and precision integer. Precision integers
+within individual values are not permitted without a currency code.
 
 ## Data Rows
 
