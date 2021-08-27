@@ -1,6 +1,10 @@
 import unittest
 from BSV import *
 
+"""
+Proof of concept tests to test the tests.
+"""
+
 
 def generate_test_string() -> str:
     """
@@ -29,11 +33,9 @@ class TestTests(unittest.TestCase):
         The short buffer exercises how the loader handles lines that span reads
         """
         with open(f) as opened_file:
-            for z in read_file_into_lines(
-                opened_file, 40
-            ):
+            for z in read_next_line_from_file(opened_file, 40):
                 print(z)
-                self.assertIn(z.ending, LINE_BREAKS + [""])
+                self.assertIn(z.ending, LINE_BREAKS)
 
 
 if __name__ == "__main__":
