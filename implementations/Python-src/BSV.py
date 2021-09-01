@@ -1,6 +1,7 @@
 import dataclasses
+from pprint import pprint
 from typing import Type, Tuple
-
+from collections import defaultdict
 from columns import *
 import io
 
@@ -88,7 +89,7 @@ def read_next_line_from_file(
     yield RawLine(o[:-1], r, start_after)
 
 
-class TableRow:
+class TableRow(abc.ABC):
     def is_valid(self):
         # TODO: rewrite this to work with dataclasses
         pass
@@ -97,6 +98,43 @@ class TableRow:
     def new_from_BSV(cls, *fields):
         return cls.__init__(*fields)
 
+    @property
+    def num_fields(self) -> int:
+        return len(self.__dataclass_fields__) - (1 if self.allow_extras else 0)
+
+    def __post_init__(self, *fields):
+        for col_num, (value, (c_name, c_type)) in enumerate(
+            zip(fields, self.columns.items())
+        ):
+            if value is not None:
+                value = value.split(c_type.sep)
+            elif not self.allow_short:
+                raise RowError(
+                    "Line too short",
+                    RECORD.join([str(f) for f in fields]),
+                    f"Only {col_num} column(s).",
+                )
+            self.__setattr__(
+                c_name, None if value is None else [c_type.type(v) for v in value]
+            )
+        if self.allow_extras:
+            self.extras = (
+                [] if fields[-1] is None else [x.split(UNIT) for x in fields[-1]]
+            )
+        else:
+            self.extras = None
+
+        # pprint(self.__dict__)
+        pass
+
+    @property
+    def values(self):
+        return [getattr(self, x) for x in self.__dataclass_fields__]
+
+
+def _column_repr__(self):
+    return f"{self.__dir__()[0]}({self.__dict__})"
+
 
 def new_table_type(
     name: str,
@@ -104,14 +142,22 @@ def new_table_type(
     allow_short: bool = False,
     allow_extras: bool = False,
 ) -> "RowType":
+    rows: List[Tuple] = []
+    ns: Dict[str] = {
+        "allow_short": allow_short,
+        "allow_extras": allow_extras,
+        "columns": {},
+        "__repr__": _column_repr__,
+    }
+    for c in columns:
+        n = "col_" + to_class_name(c.name)
+        rows.append((n, dataclasses.InitVar))
+        ns["columns"][n] = c
+    if allow_extras:
+        rows.append(("extras", dataclasses.InitVar))
+        ns["extras"] = True
     return dataclasses.make_dataclass(
-        f"{to_class_name(name)}_row",
-        [(f"col_{to_class_name(c.name)}", list, c.dataclass_field) for c in columns]
-        + [("extras", list, field(default_factory=list))]
-        if allow_extras
-        else [],
-        bases=(TableRow,),
-        namespace={"allow_short": allow_short, "allow_extras": allow_extras},
+        f"{to_class_name(name)}_row", rows, bases=(TableRow,), namespace=ns,
     )
 
 
@@ -126,20 +172,70 @@ def new_table_from_BSV_header(
 
     columns = []
     for c in column_row:
-        c_name = c.split(UNIT)[0]
+        c_name, *c_attrs = c.split(UNIT)
+        if not c_attrs:
+            ...  # assume unlimited string
         columns.append(ColumnDefinition(c_name))
 
     return new_table_type(title, *columns, allow_short=a_s, allow_extras=a_x)
 
 
-def raw_line2dataclass(row_type: Type[TableRow], *data):
-    num_fields = len(row_type.__dataclass_fields__) - 1
-    d2 = list(data)
-    if len(data) > num_fields and row_type.allow_extras:  # -1 for the extras field
-        x: List = d2[num_fields:]
-        d2 = d2[0:num_fields]
-        return row_type(*d2, x)
-    return row_type(*data)
+def raw_line2dataclass(row_type: Type[RowType], data: RawLine, row_index: int = -1):
+    num_fields = len(row_type.__dataclass_fields__) - (
+        1 if row_type.allow_extras else 0
+    )
+    d2 = data.parts
+    if len(d2) > num_fields:
+        if row_type.allow_extras:
+            x: List = d2[num_fields:]
+            d2 = d2[0:num_fields]
+            o = row_type(*d2, x)
+            o.__setattr__("row_index", row_index)
+        raise RowError(
+            "Too many fields!",
+            data,
+            f"{len(d2)} fields were provided for a table with {num_fields} in row {row_index} of the input file.",
+        )
+
+    if len(d2) < num_fields:
+        # +1 for extra fields
+        d2 += [None] * ((1 if row_type.allow_extras else 0) + num_fields - len(d2))
+    o = row_type(*d2)
+    o.__setattr__("row_index", row_index)
+    return o
+
+
+class InputError(ValueError):
+    def __init__(
+        self,
+        description: Optional[str] = "Incorrectly-formatted file",
+        row: Optional = None,
+        details: Optional[str] = "",
+        line_num: Optional[int] = None,
+        *_args,
+        **_kwargs,
+    ):
+        self.description = description
+        self.row = row
+        self.file_offset = row.starts_after if isinstance(row, RawLine) else None
+        self.details = details
+        self.line_num = line_num
+
+        super().__init__(str(self))
+
+    def __str__(self):
+        return f"{self.description}!\n{self.details}\n{self.row}"
+
+    def __repr__(self):
+        return f"{type(self).__name__}: {self.description} on line {self.line_num}.  {self.details}"
+
+
+class RowError(InputError):
+    pass
+
+
+class ColumnError(InputError):
+    pass
 
 
 class FileReader:
@@ -184,18 +280,28 @@ class FileReader:
         self.current_table = t
         return t
 
-    def read_file(self):
+    def read_file(self, strict: bool = True, errors: defaultdict = None):
+        if errors is None:
+            errors = defaultdict(list)
         while True:
             line = self.next_row()
             if not line.ending and not line.content:
-                raise StopIteration  # file is all done
+                # raise StopIteration  # file is all done
+                return errors
             if (
                 self.last_ending in FILE
             ):  # also covers the empty string at the start of reading
                 print("new table!")
                 self._read_table_header()  # no need to pass a param
-                print(self.current_table.__dict__)
+                pprint(self.current_table.__dict__)
                 continue
-            yield raw_line2dataclass(self.current_table, *line.parts)
+            try:
+                yield raw_line2dataclass(self.current_table, line, self.row_index)
+            except InputError as e:
+                errors[self.row_index].append((e, line,))
+                if strict:
+                    raise e
+                else:
+                    continue
 
     pass

@@ -17,6 +17,7 @@ from typing import (
     Optional,
     Type,
 )
+import re
 
 """
 Separated into a second file for shorter file lengths.
@@ -33,7 +34,7 @@ UNIT: chr = "\x1F"
 
 
 def to_class_name(s: str) -> str:
-    return s.title().replace(" ", "")
+    return re.sub(r"\W", "", s.title())
 
 
 def is_valid_field(self: dataclasses.Field):
@@ -44,12 +45,13 @@ class ColumnDefinition(NamedTuple):
     name: str
     type: Type = str
     max: int = sys.maxsize
+    sep: chr = UNIT
     min: int = -1
 
     @property
     def dataclass_field(self) -> dataclasses.Field:
         return field(
-            default_factory=list,
+            default=None,
             metadata={
                 "original_name": self.name,
                 "mod_name": to_class_name(self.name),
@@ -59,8 +61,15 @@ class ColumnDefinition(NamedTuple):
             },
         )
 
+    def make_column_type(self, table: str):
+        return type(
+            "cell_" + to_class_name(table) + "_" + to_class_name(self.name),
+            (BaseCell,),
+            {"max_items": self.max, "min_items": self.min, "type": self.type,},
+        )
 
-class BaseCell(abc.ABC):
+
+class BaseCell:
     values: "List[ValueType]"
     separator: chr = UNIT
 
@@ -109,18 +118,10 @@ class StringValue(BaseValue):
         return StringValue(value)
 
 
-class StringCell(BaseCell):
-    pass
-
-
 class IntegerValue(BaseValue):
     @staticmethod
     def from_str(value: str):
         return IntegerValue(int(value))
-
-
-class IntegerCell(BaseCell):
-    pass
 
 
 class RelativeDatetimeValue(BaseValue):
