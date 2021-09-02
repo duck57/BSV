@@ -9,12 +9,16 @@ Quick testing harness drivers to load from real BSV files
 """
 
 
-with open("../../test_BSV_files/test_table.bsv") as f:
-    r = FileReader(f)
-    e = defaultdict(list)
-    for row in r.read_file(False, e):
-        pprint(row)
-    pprint(e)
+def test_reading(
+    file_name: str = "../../test_BSV_files/test_table.bsv", i_d: bool = False
+):
+    with open(file_name) as f:
+        r = FileReader(f)
+        e = defaultdict(list)
+        for row in r.read_file(e, strict=False, into_dicts=i_d):
+            pprint(row)
+        pprint(e)
+
 
 if __name__ == "__main__":
-    pass
+    test_reading(i_d=True)

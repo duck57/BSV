@@ -31,6 +31,8 @@ FILE: chr = "\x1C"
 GROUP: chr = "\x1D"
 RECORD: chr = "\x1E"
 UNIT: chr = "\x1F"
+LINE: chr = "\n"
+TAB: chr = "\t"
 
 
 def to_class_name(s: str) -> str:

@@ -1,4 +1,5 @@
 import dataclasses
+from itertools import zip_longest
 from pprint import pprint
 from typing import Type, Tuple
 from collections import defaultdict
@@ -136,6 +137,10 @@ def _column_repr__(self):
     return f"{self.__dir__()[0]}({self.__dict__})"
 
 
+def _column_names(cls) -> List[str]:
+    return [c.name for c in cls.columns.values()]
+
+
 def new_table_type(
     name: str,
     *columns: ColumnDefinition,
@@ -148,6 +153,8 @@ def new_table_type(
         "allow_extras": allow_extras,
         "columns": {},
         "__repr__": _column_repr__,
+        "orig_name": name,
+        "column_names": _column_names,
     }
     for c in columns:
         n = "col_" + to_class_name(c.name)
@@ -239,9 +246,15 @@ class ColumnError(InputError):
 
 
 class FileReader:
-    """"""
+    """
+
+    """
 
     def __init__(self, f):
+        """
+        Creates a new file reader
+        :param f: A file-like object opened in "rt" mode.  The file to read.
+        """
         self.tables = {}
         self.rows = read_next_line_from_file(f)
         self.current_table = None
@@ -250,6 +263,11 @@ class FileReader:
         self.row_index: int = 0
 
     def next_row(self):
+        """
+        Reads the next row from the file and updates the internal state
+        :return: The next row from the file, in case client code wishes to
+        use it directly.
+        """
         self.row_index += 1
         self.last_ending = self.current_row.ending if self.current_row else ""
         self.current_row = next(self.rows)
@@ -257,9 +275,8 @@ class FileReader:
 
     def _read_table_header(self):
         """
-        Reads a table header row
-        :return: An existing TableReader object if one exists for the same name
-        If no match is found, creates and returns the new reader
+        Reads a table header row and updates the internal state to
+        reflect the change in current table.
         """
         assert (
             self.current_row.ending == GROUP
@@ -280,9 +297,24 @@ class FileReader:
         self.current_table = t
         return t
 
-    def read_file(self, strict: bool = True, errors: defaultdict = None):
+    def read_file(
+        self,
+        errors: defaultdict = None,
+        *,
+        strict: bool = True,
+        into_dicts: bool = False,
+    ):
+        """Where all the magic occurs.  Reads the file into dataclasses or dicts.
+
+        :param errors: writable
+        :param strict: stop processing and raise an exception at any error?
+        :param into_dicts: Read the file into dicts?  If not, each table generates a
+        subtype of dataclass in which the results are stored.
+        :return: yields either a dict or a dataclass for each row of the input file
+        """
         if errors is None:
             errors = defaultdict(list)
+        conversion_function = raw_line2dict if into_dicts else raw_line2dataclass
         while True:
             line = self.next_row()
             if not line.ending and not line.content:
@@ -296,7 +328,7 @@ class FileReader:
                 pprint(self.current_table.__dict__)
                 continue
             try:
-                yield raw_line2dataclass(self.current_table, line, self.row_index)
+                yield conversion_function(self.current_table, line, self.row_index)
             except InputError as e:
                 errors[self.row_index].append((e, line,))
                 if strict:
@@ -305,3 +337,43 @@ class FileReader:
                     continue
 
     pass
+
+
+def raw_line2dict(row_type: Type[RowType], data: RawLine, row_index: int = -1):
+    """
+    Closer to csv.DictReader than raw_line2dataclass in spite sharing a function
+    signature with the later.
+
+    This function does zero validation of the input rows and puts everything
+    (both column names and values) into strings or lists thereof.
+
+    :param row_type: A class of type of row
+    :param data: the RawLine to process
+    :param row_index: for creating the metadata
+    :return: A dict where each column name is a (string) key.
+    Any non-string keys in this dict are either metadata o[151374]
+    or are for spillover values when there are more values than columns o[None].
+
+    o[None] == None indicates that there are no spillover values in the row.
+    Likewise, o[column] == None indicates that the row ran out of values before
+    reaching this column.  A column with an empty value has a value of '' in the dict.
+
+    Each cell is turned into a list of strings that are split according to the
+    column definition.
+    """
+    meta = {"table_name": row_type.orig_name, "row_index": row_index}
+    o = {None: None}
+    for column_type, value in zip_longest(
+        row_type.columns.values(), data.content.split(RECORD), fillvalue=None
+    ):
+        if column_type is None:  # extra fields
+            if o[None] is None:
+                o[None] = []
+            o[column_type].append(value.split(UNIT))
+            continue
+
+        # the usual route
+        column_name = column_type.name
+        o[column_name] = value if value is None else value.split(TAB if False else UNIT)
+    o[151374] = meta  # 151 = IVI (looks like m), 374 = ETA
+    return o
