@@ -1,6 +1,6 @@
 # Better Separated Values
 
-An improvement to CSV.  Current version = 0.0.3 ^ 0/1
+An improvement to CSV.  Current version = 0.0.4 ^ 0/1
 
 ## Inspiration
 
@@ -30,7 +30,8 @@ in the same field without implementing a one-off custom delimiter.
 ### 1.0
 
 * No further format changes are proposed after robust outside feedback
-* The implementations should probably be split into separate projects at this point.
+* The implementations should probably be split into separate projects at this
+  point.
 
 # Semi-formal specification
 
@@ -78,90 +79,107 @@ Each table consists of:
 3. 0 or more data rows
 
 
-* Multiple tables within a single file are separated by `\x1F`.
+* Multiple tables within a single file are separated by `\x1C`.
+* Re-using a table name header should pull up the previously-defined header and
+  therefore does not need a second row to re-define columns.
+* Table and column names should be insensitive to case and whitespace.
 
-### TODO decision before 0.1.x
+### Note on Comment, Client, and Extras… fields
 
-How should multiple tables with the same name (case-insensitive?) be handled?
+In both the table and column definitions, there are fields labeled `comment`,
+`client`, and `extras…`.  These fields have identical meaning in both.
 
-1. Overwrite/error as a malformed file
-2. Continue previous table of same name (thus making the column header row a
-   requirement for _only_ the first definition of a table name)
-3. Leave this as deliberately unspecified/undefined behaviour that lets
-   incidental implementation details shine through
+#### Comment
 
-Python OO-implementation leans toward option 2. Will need to try Elixir &
-Clojure implementations to see how they would handle this situation.
+A human-readable comment about the table or column.
+
+#### Client
+
+A field for miscellaneous data to be read by the client software.
+
+#### Extras…
+
+Other extraneous fields.  Their vacancy should not be relied upon when writing
+BSV files with forward-compatibility in mind.
 
 ## Table Header
 
-table\_name[`\x1e`options string]
+    table name<RECORD>options string 1<RECORD>comment<RECORD>client<RECORD>extras…
 
-### Options String
+Additional fields after the comment are currently unused but should not be
+relied upon to remain empty for future use.  The only required information is
+the table name.
+
+### Options String 1
 
 One-character flags that set up the integrity options for the table as a whole.
-Defaults are all no.  Order within this string is not important?
+Defaults are all no. 
 
-### Allow extra fields? `X`
+Maximum and minimum numbers of fields per row should both be handled by client
+software. A good use case for the `Client` field.
+
+#### Allow extra fields? `X`
 
 If seven column headers are defined, allow records with eight or more fields.
-The extra fields are to be treated as string fields with unlimited multi-values each.
+The extra fields are to be treated as string fields with unlimited multi-values
+each.
 
-TODO before 0.2.x: allow setting a maximum number of total fields per row?
-
-### Allow short rows? `S`
+#### Allow short rows? `S`
 
 If seven column headers are defined, allow records with six or fewer fields.
-
-TODO before 0.2.x: allow setting for a minimum number of fields in each row?
 
 ### TODO before 0.2.x
 
 Are there other table-wide options to consider?
 
-## Column Header
+## Column Headers
 
-field1`\x1E`field\_2`\x1F`option-2`\x1F`more`\x1E`field-3`\x1E`
+    field 1<RECORD>field 2<UNIT>options…<RECORD>field 3…
 
 The column header row is a series of column headers separated by `\x1E`.  Each
 column header consists of a presumed-unique field name optionally followed by
-`\x1F` and validation hinting options.  The behaviour of duplicate field names
-is left deliberately undefined.
+`\x1F` and validation hinting options (each separated by an additional `\x1F`).
+The behaviour of duplicate field names  is left deliberately undefined.
 
-### Validation hinting options
+The structure of a column's definition includes the following headers in order.
+Only the field name is required.  Each header is separated with `\x1F`.
 
-In the general format of `X9t`.
+1. Field name
+2. Data hint.  Defaults to String.  See below for the list of data types.  The
+   first character of this header determines which validation is to be used.
+3. Range of number of valid numbers of values per entry separated with `-`:
+   `min-sep-max`.  If `min` is omitted, it defaults to 0; if `max` is omitted,
+   it defaults to the system's maximum integer.  See below for notes on the
+   separator.
+4. Comment
+5. Client
+6. Extras…
 
-* `X` is the letter of the format (see below)
-* `9` is either a single digit or an asterisk (`*`).  If between 1–9, this is
-  the maximum number of values in the field.  `0` stands for "only" and means
-that a single value is required in the field.  `*` allows any number of values.
-If you, for example, need to have between 3 nad 7 values, make four columns:
-three of which are `0` and the fourth as `4`. 
-* `t` is an optional flag whose presence means that a tab is used to separate
-  values within a field rather than the unit separator.  This flag is not valid
-on multi-response string fields.
+### Notes on `sep`
 
-#### TODO before 0.1.x
+The separator (and preceding hyphen) are optional characters which change the
+separator between values in a column from the default UNIT SEPARATOR to
+something easier for human editing.
 
-* Specify both a minimum and maximum value count?
-* Allow specified maximum value counts over 9?
-* Switch meanings of `0` and `*`?
+* `t` = tab-separated values
+* `s` = space-delimited values (only valid for integers, floats, and relative
+  datetime: all other types fall back to `\x1F`)
+* anything else falls back to the unit separator
 
-### Format hints
+This is entirely ignored for columns with a String (or default) data hint.
 
-#### String: `S`
+## Supported data hints 
 
-The default format for a column (including spare fields) is `S*`.
+### String: `S`
 
-#### Integer: `I`
+### Integer: `I`
 
-#### Decimal: `F`
+### Decimal: `F`
 
 Stands for float, which is what it will presume to be stored as in the
 client's RAM.
 
-#### Fraction: `R`
+### Fraction: `R`
 
 Fractions without a denominator will be assumed to be over 1.  Clients should
 store both the numerator and denominator as integers if possible and otherwise
@@ -170,22 +188,16 @@ store them both as floats.
 TODO: or should the integer/float conversion be separate for the numerator &
 denominator?
 
-#### Date: `D`
+### Date: `D`
 
-An ISO 8601 datetime.  Non-ISO 8601 time stamps should be stored as regular
+An ISO 8601 date(time).  Non-ISO 8601 time stamps should be stored as regular
 integers or strings.
 
-#### Time: `T`
+### Time: `T`
 
-An ISO 8601-flavored time.  Both fractional seconds and an additional `:` for
-frames are acceptable.
+An ISO 8601-flavored time.
 
-* `18:03:16.5`
-* `00:49:06:23`
-
-TODO: is this redundant with the date hint?
-
-#### Relative date/time: `E`
+### Relative date/time: `E`
 
 General format is `X±12`.  `+` represents the future and `-` is for the past.
 `X` is one of the interval abbreviations outlined below.  The number should
@@ -193,7 +205,7 @@ generally be an integer, especially for `T`, `W`, or `M`.  However, clients are
 encouraged to soften this requirement by rounding non-integer values to a
 sensible whole number of days.
 
-##### Hour: `H`
+#### Hour: `H`
 
 If the number is a non-integer, the behavior of the number depends on the separator.
 
@@ -203,26 +215,26 @@ If the number is a non-integer, the behavior of the number depends on the separa
 For 0.2.x, should the colon separator also allow for seconds or frames or are
 minutes are fine-grained as necessary?
 
-##### Day: `T`
+#### Day: `T`
 
 `t+1` means to increment the day by 1.
 
-##### Week: `W`
+#### Week: `W`
 
 `w+1` == `t+7`
 
-##### Month: `M`
+#### Month: `M`
 
 `M+1` meant to increment the month by 1.
 
-##### Year: `Y`
+#### Year: `Y`
 
 `Y+1` is one year in the future.
 
 For fractional years, should they round to the nearest day or nearest month?
 Should this be unspecified? 
 
-#### Currency: `C`
+### Currency: `C`
 
 First, some examples:
 
