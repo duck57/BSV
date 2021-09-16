@@ -1,5 +1,6 @@
 import unittest
 from BSV import *
+from BSV import _split_file_into_rows
 
 """
 Proof of concept tests to test the tests.

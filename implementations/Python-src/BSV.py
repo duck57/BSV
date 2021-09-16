@@ -1,4 +1,5 @@
 import dataclasses
+from copy import deepcopy
 from itertools import zip_longest
 from pprint import pprint
 from typing import Type, Tuple, Iterable, Iterator
@@ -33,17 +34,17 @@ class RawLine(NamedTuple):
     other values may cause undefined behavior
     """
 
-    content: str
+    content: List[str]
     ending: chr
     row_index: int = -1
     starts_after: int = -1
 
-    @property
-    def parts(self) -> List[str]:
-        return self.content.split(RECORD)
-
     def extract_table_name(self) -> str:
-        return to_class_name(self.content.split(RECORD)[0])
+        """For use when reading a table header
+
+        :return: A normalized edition of the table name string
+        """
+        return to_class_name(self.content[0])
 
 
 def _split_file_into_rows(
@@ -65,9 +66,10 @@ def _split_file_into_rows(
     done: bool = False
     row_index = 1
 
-    # r is the raw buffer in RAM off the disk
-    # o is the output buffer
-    o, r = "", ""  # initialize empty buffers
+    # r: raw buffer in RAM off the disk
+    # o: output list (split by RECORD SEPARATOR)
+    # s: string buffer to add to output
+    o, r, s = [], "", ""  # initialize empty buffers
 
     # read the file until it's all done
     while not done:
@@ -75,25 +77,29 @@ def _split_file_into_rows(
         r: str = f.read(buffer)
         if not r:  # nothing more in the file, process the current s buffer and exit
             done = True
-        o += r  # prepend any residual output buffer
+        s += r  # prepend any residual output buffer
 
         # take advantage of the fact that splitlines() includes the file and group separators
         # otherwise, we'd need regular expressions
-        lines = o.splitlines(True)  # keep the terminal character for proper processing
+        lines = s.splitlines(True)  # keep the terminal character for proper processing
 
-        o = ""  # the output buffer has been split for analysis; time to clear it
+        s = ""  # the output buffer has been split for analysis; time to clear it
         for line in lines:  # is there something more efficient here?
-            if not o and line == "\n":
+            if not s and line == "\n":
                 continue  # strip convenience lines
             # print(repr(line))  # debugging
             end = line[-1]
-            o += line[:-1]
+            s += line[:-1]
             if end in LINE_BREAKS:
-                yield RawLine(o, end, row_index, start_after)
-                o = ""  # reset the output string
+                yield RawLine(o + [s], end, row_index, start_after)
+                o, s = [], ""  # reset the output string
                 row_index += 1  # increment for the next row
                 continue
-            o += end  # it's not one of the line breaks we care about just yet
+            if end == RECORD:
+                o.append(s)
+                s = ""
+                continue
+            s += end  # it's not one of the line breaks we care about just yet
 
     """
     yield out the final line
@@ -216,17 +222,16 @@ def new_table_from_raw_lines(
         "client": None,  # 3
         "extras": [],  # 4
     }
-    table_attrs: List[str] = table_definition.content.split(RECORD)
-    for attr, value in zip(tad.keys(), table_attrs):
+    for attr, value in zip(tad.keys(), table_definition.content):
         if attr == "extras":
             break  # handle these a line later
         tad[attr] = value
-    tad["extras"] = table_attrs[4:]
+    tad["extras"] = table_definition.content[4:]
     tad["allow_short"] = "S" in tad["options"].upper()
     tad["allow_extras"] = "X" in tad["options"].upper()
 
     columns = []
-    for raw_c in column_heads.content.split(RECORD):
+    for raw_c in column_heads.content:
         c_attrs = {
             "name": "",  # 0
             "data_hint": "",  # 1
@@ -267,7 +272,7 @@ def raw_line2dataclass(row_type: Type[RowType], data: RawLine, row_index: int = 
     num_fields = len(row_type.__dataclass_fields__) - (
         1 if row_type.allow_extras else 0
     )
-    d2 = data.parts
+    d2 = deepcopy(data.content)
     if len(d2) > num_fields:
         if row_type.allow_extras:
             x: List = d2[num_fields:]
@@ -348,7 +353,7 @@ def raw_line2dict(row_type: Type[RowType], data: RawLine, row_index: int = -1):
     meta = {"table_name": row_type.original_name, "row_index": row_index}
     o = {None: None}
     for column_type, value in zip_longest(
-        row_type.columns.values(), data.content.split(RECORD), fillvalue=None
+        row_type.columns.values(), data.content, fillvalue=None
     ):
         if column_type is None:  # extra fields
             if o[None] is None:
@@ -384,9 +389,12 @@ def read_file_into_rows(
     strict: bool = True,
     into_dicts: bool = False,
     direct_iterator: Optional[Iterable[RawLine]] = None,
+    buffer: int = io.DEFAULT_BUFFER_SIZE,
 ):
     """Where all the magic occurs.  Reads the file into dataclasses or dicts.
 
+    :param buffer: controls how much of the file to read at a times.
+    No need to adjust this under normal circumstances.
     :param direct_iterator: alternate to f
     :param f: the BSV file-like object to read
     :param errors: writable
@@ -400,7 +408,7 @@ def read_file_into_rows(
     last_ending: chr = ""
     rows: Iterator[RawLine] = iter(
         direct_iterator
-    ) if direct_iterator else _split_file_into_rows(f)
+    ) if direct_iterator else _split_file_into_rows(f, buffer)
     if errors is None:
         errors = defaultdict(list)
     conversion_function = raw_line2dict if into_dicts else raw_line2dataclass
