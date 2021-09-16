@@ -1,7 +1,7 @@
 import dataclasses
 from itertools import zip_longest
 from pprint import pprint
-from typing import Type, Tuple
+from typing import Type, Tuple, Iterable, Iterator
 from collections import defaultdict
 from columns import *
 import io
@@ -20,28 +20,35 @@ NAMES_DICT: "Dict[chr, str]" = {
 
 
 class RawLine(NamedTuple):
-    """
-    The raw line data for a BSV file.
+    """The raw line data for a BSV file.
 
     Ending meanings:
-    '\x1D' = end of line/record/row
-    '\x1C' = end of table, client should read next table
-    '' = end of physical file
+
+    - GROUP SEPARATOR = end of line/record/row
+
+    - FILE SEPARATOR = end of table, client should read next table
+
+    - '' = end of physical file
+
     other values may cause undefined behavior
     """
 
     content: str
     ending: chr
+    row_index: int = -1
     starts_after: int = -1
 
     @property
     def parts(self) -> List[str]:
         return self.content.split(RECORD)
 
+    def extract_table_name(self) -> str:
+        return to_class_name(self.content.split(RECORD)[0])
 
-def read_next_line_from_file(
+
+def _split_file_into_rows(
     f, buffer: int = io.DEFAULT_BUFFER_SIZE, **_options
-) -> RawLine:  # -> Generator[RawLine, None, None]:
+) -> "Generator[RawLine]":
     """
     Reads a file and splits into "lines" terminated with either \x1C or \x1D.
     Essentially a very fancy str.splitlines(True)
@@ -53,11 +60,16 @@ def read_next_line_from_file(
     :param buffer: read this many characters at a time
     :return: a RawLine
     """
+    # setup
     start_after: int = 0  # for debugging purposes
     done: bool = False
+    row_index = 1
+
     # r is the raw buffer in RAM off the disk
     # o is the output buffer
     o, r = "", ""  # initialize empty buffers
+
+    # read the file until it's all done
     while not done:
         start_after = f.tell()
         r: str = f.read(buffer)
@@ -77,8 +89,9 @@ def read_next_line_from_file(
             end = line[-1]
             o += line[:-1]
             if end in LINE_BREAKS:
-                yield RawLine(o, end, start_after)
+                yield RawLine(o, end, row_index, start_after)
                 o = ""  # reset the output string
+                row_index += 1  # increment for the next row
                 continue
             o += end  # it's not one of the line breaks we care about just yet
 
@@ -87,7 +100,7 @@ def read_next_line_from_file(
     it's o[-1] to strip out the trailing newline
     r == "" at this point.
     """
-    yield RawLine(o[:-1], r, start_after)
+    yield RawLine(o[:-1], r, row_index, start_after)
 
 
 class TableRow(abc.ABC):
@@ -134,7 +147,7 @@ class TableRow(abc.ABC):
 
 
 def _column_repr__(self):
-    return f"{self.__dir__()[0]}({self.__dict__})"
+    return f"{self.__name__}_row({self.__dict__})"
 
 
 def _column_names(cls) -> List[str]:
@@ -146,29 +159,92 @@ def new_table_type(
     *columns: ColumnDefinition,
     allow_short: bool = False,
     allow_extras: bool = False,
-) -> "RowType":
-    rows: List[Tuple] = []
-    ns: Dict[str] = {
+    **ns,
+) -> "Type[RowType]":
+    """Creates a new Class to contain rows from a table
+
+    :param name: The name of the table.  Gets changed to "Name_row" in the output
+    :param columns: Any number of ColumnDefinitions in order of the table's columns
+    :param allow_short: Consider short rows to be valid
+    :param allow_extras: Consider rows with extra values to be valid
+    :param ns: other attributes to be put into the class' namespace
+    :return: A new Class
+    """
+    # prep work
+    columns_as_fields: List[Tuple] = []
+    ns = {
+        "__name__": name,
+        **ns,
         "allow_short": allow_short,
         "allow_extras": allow_extras,
         "columns": {},
         "__repr__": _column_repr__,
-        "orig_name": name,
         "column_names": _column_names,
     }
+    # turn the columns into Dataclass fields
     for c in columns:
         n = "col_" + to_class_name(c.name)
-        rows.append((n, dataclasses.InitVar))
+        columns_as_fields.append((n, dataclasses.InitVar))
         ns["columns"][n] = c
     if allow_extras:
-        rows.append(("extras", dataclasses.InitVar))
+        columns_as_fields.append(("extras", dataclasses.InitVar))
         ns["extras"] = True
+    # create the new class
     return dataclasses.make_dataclass(
-        f"{to_class_name(name)}_row", rows, bases=(TableRow,), namespace=ns,
+        f"{name}_row", columns_as_fields, bases=(TableRow,), namespace=ns,
     )
 
 
 RowType = TypeVar("RowType", bound=TableRow)
+
+
+def new_table_from_raw_lines(
+    table_definition: RawLine, column_heads: RawLine
+) -> "Type[RowType]":
+    """
+
+    :param table_definition:
+    :param column_heads:
+    :return:
+    """
+    # There clearly has to be a better way to split a string into
+    # a list with meaningful order when not all components are present
+    tad = {
+        "original_name": "",  # 0
+        "options": "",  # 1
+        "comment": None,  # 2
+        "client": None,  # 3
+        "extras": [],  # 4
+    }
+    table_attrs: List[str] = table_definition.content.split(RECORD)
+    for attr, value in zip(tad.keys(), table_attrs):
+        if attr == "extras":
+            break  # handle these a line later
+        tad[attr] = value
+    tad["extras"] = table_attrs[4:]
+    tad["allow_short"] = "S" in tad["options"].upper()
+    tad["allow_extras"] = "X" in tad["options"].upper()
+
+    columns = []
+    for raw_c in column_heads.content.split(RECORD):
+        c_attrs = {
+            "name": "",  # 0
+            "data_hint": "",  # 1
+            "range": "",  # 2
+            "comment": "",  # 3
+            "client": None,  # 4
+            "extras": [],  # 5
+        }
+        col_attrs: List[str] = raw_c.split(UNIT)
+        for attr, value in zip(c_attrs.keys(), col_attrs):
+            if attr == "extras":
+                break
+            c_attrs[attr] = value
+        c_attrs["extras"] = col_attrs[5:]
+
+        columns.append(ColumnDefinition(**c_attrs))
+
+    return new_table_type(table_definition.extract_table_name(), *columns, **tad)
 
 
 def new_table_from_BSV_header(
@@ -245,100 +321,6 @@ class ColumnError(InputError):
     pass
 
 
-class FileReader:
-    """
-
-    """
-
-    def __init__(self, f):
-        """
-        Creates a new file reader
-        :param f: A file-like object opened in "rt" mode.  The file to read.
-        """
-        self.tables = {}
-        self.rows = read_next_line_from_file(f)
-        self.current_table = None
-        self.current_row = None
-        self.last_ending = ""
-        self.row_index: int = 0
-
-    def next_row(self):
-        """
-        Reads the next row from the file and updates the internal state
-        :return: The next row from the file, in case client code wishes to
-        use it directly.
-        """
-        self.row_index += 1
-        self.last_ending = self.current_row.ending if self.current_row else ""
-        self.current_row = next(self.rows)
-        return self.current_row
-
-    def _read_table_header(self):
-        """
-        Reads a table header row and updates the internal state to
-        reflect the change in current table.
-        """
-        assert (
-            self.current_row.ending == GROUP
-        ), f"Incorrect ending in table header\n\t{repr(self.current_row)}"
-        meta: Dict[str] = {
-            "row_number": self.row_index,
-            "bytes_after": self.current_row.starts_after,
-        }
-        parts = self.current_row.parts
-        title = parts[0].lower().strip()
-        options = parts[1:] if len(parts) > 1 else []
-        t = self.tables.get(title)
-        if not t:
-            t = new_table_from_BSV_header(
-                title, self.next_row().parts, *options, **meta
-            )
-            self.tables[title] = t
-        self.current_table = t
-        return t
-
-    def read_file(
-        self,
-        errors: defaultdict = None,
-        *,
-        strict: bool = True,
-        into_dicts: bool = False,
-    ):
-        """Where all the magic occurs.  Reads the file into dataclasses or dicts.
-
-        :param errors: writable
-        :param strict: stop processing and raise an exception at any error?
-        :param into_dicts: Read the file into dicts?  If not, each table generates a
-        subtype of dataclass in which the results are stored.
-        :return: yields either a dict or a dataclass for each row of the input file
-        """
-        if errors is None:
-            errors = defaultdict(list)
-        conversion_function = raw_line2dict if into_dicts else raw_line2dataclass
-        while True:
-            line = self.next_row()
-            if not line.ending and not line.content:
-                # raise StopIteration  # file is all done
-                return errors
-            if (
-                self.last_ending in FILE
-            ):  # also covers the empty string at the start of reading
-                print("new table!")
-                self._read_table_header()  # no need to pass a param
-                pprint(self.current_table.__dict__)
-                continue
-            try:
-                yield conversion_function(self.current_table, line, self.row_index)
-            except InputError as e:
-                errors[self.row_index].append((e, line,))
-                if strict:
-                    raise e
-                else:
-                    continue
-
-    pass
-
-
 def raw_line2dict(row_type: Type[RowType], data: RawLine, row_index: int = -1):
     """
     Closer to csv.DictReader than raw_line2dataclass in spite sharing a function
@@ -354,14 +336,16 @@ def raw_line2dict(row_type: Type[RowType], data: RawLine, row_index: int = -1):
     Any non-string keys in this dict are either metadata o[151374]
     or are for spillover values when there are more values than columns o[None].
 
-    o[None] == None indicates that there are no spillover values in the row.
-    Likewise, o[column] == None indicates that the row ran out of values before
-    reaching this column.  A column with an empty value has a value of '' in the dict.
+    - o[None] == None indicates that there are no spillover values in the row.
+
+    - Likewise, o[column] == None indicates that the row ran out of values before reaching this column.
+
+    - A column with an empty value has a value of '' in the dict.
 
     Each cell is turned into a list of strings that are split according to the
     column definition.
     """
-    meta = {"table_name": row_type.orig_name, "row_index": row_index}
+    meta = {"table_name": row_type.original_name, "row_index": row_index}
     o = {None: None}
     for column_type, value in zip_longest(
         row_type.columns.values(), data.content.split(RECORD), fillvalue=None
@@ -377,3 +361,89 @@ def raw_line2dict(row_type: Type[RowType], data: RawLine, row_index: int = -1):
         o[column_name] = value if value is None else value.split(TAB if False else UNIT)
     o[151374] = meta  # 151 = IVI (looks like m), 374 = ETA
     return o
+
+
+class ErrorList(list):
+    @property
+    def by_line(self):
+        ...
+
+    @property
+    def by_severity(self):
+        ...
+
+    @property
+    def by_type(self):
+        ...
+
+
+def read_file_into_rows(
+    f,
+    errors: defaultdict = None,
+    *,
+    strict: bool = True,
+    into_dicts: bool = False,
+    direct_iterator: Optional[Iterable[RawLine]] = None,
+):
+    """Where all the magic occurs.  Reads the file into dataclasses or dicts.
+
+    :param direct_iterator: alternate to f
+    :param f: the BSV file-like object to read
+    :param errors: writable
+    :param strict: stop processing and raise an exception at any error?
+    :param into_dicts: Read the file into dicts?  If not, each table generates a
+    subtype of dataclass in which the results are stored.
+    :return: yields either a dict or a dataclass for each row of the input file
+    """
+
+    # setup
+    last_ending: chr = ""
+    rows: Iterator[RawLine] = iter(
+        direct_iterator
+    ) if direct_iterator else _split_file_into_rows(f)
+    if errors is None:
+        errors = defaultdict(list)
+    conversion_function = raw_line2dict if into_dicts else raw_line2dataclass
+    current_table: Type[RowType] = type(
+        RowType
+    )  # this assignment is to make the linter shut up later
+    tables: Dict[str, Type[RowType]] = {}
+
+    # the actual processing loop
+    for line in rows:
+        if not line.ending and not line.content:
+            continue  # file is all done
+
+        # read table header
+        # also covers the empty string at the start of reading
+        if last_ending in FILE:
+            print("next table!")
+            table_name = line.extract_table_name()
+            if table_name not in tables.keys():  # define a new table
+                """
+                next(rows) is called here and not in new_table() so
+                that last_ending may be properly set
+                """
+                column_headers: RawLine = next(rows)
+                tables[table_name] = new_table_from_raw_lines(line, column_headers)
+                last_ending = column_headers.ending
+            else:
+                last_ending = line.ending
+            current_table = tables[table_name]
+            pprint(current_table)
+            continue
+
+        # read the row into an object (or collect an error)
+        try:
+            yield conversion_function(current_table, line, line.row_index)
+        except InputError as e:
+            errors[line.row_index].append((e, line,))
+            if strict:
+                raise e
+            else:
+                pass
+
+        # save the ending for reading the next line
+        last_ending = line.ending
+
+    return errors

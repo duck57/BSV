@@ -43,12 +43,39 @@ def is_valid_field(self: dataclasses.Field):
     return True
 
 
-class ColumnDefinition(NamedTuple):
-    name: str
-    type: Type = str
-    max: int = sys.maxsize
-    sep: chr = UNIT
-    min: int = -1
+class ColumnDefinition:
+    def __init__(
+            self,
+            name: str,
+            data_type: Type = str,
+            max_vals: int = sys.maxsize,
+            sep: chr = UNIT,
+            min_vals: int = -1,
+            range_str: str = "",
+            template: bool = False,
+            **misc_attrs,
+    ):
+        self.name = name
+        self.type = data_type
+        if range_str:
+            vals = range_str.split("-")
+            try:
+                min_vals = int(vals[0])
+            except ValueError:
+                pass
+            try:
+                max_vals = int(vals[-1])
+            except ValueError:
+                pass
+            if len(vals) > 2:
+                sep = vals[1]
+        self.max = max_vals
+        self.min = min_vals
+        self.sep = sep
+        self.is_template = template
+
+        for a, v in misc_attrs.items():
+            self.__setattr__(a, v)
 
     @property
     def dataclass_field(self) -> dataclasses.Field:
@@ -63,70 +90,15 @@ class ColumnDefinition(NamedTuple):
             },
         )
 
-    def make_column_type(self, table: str):
-        return type(
-            "cell_" + to_class_name(table) + "_" + to_class_name(self.name),
-            (BaseCell,),
-            {"max_items": self.max, "min_items": self.min, "type": self.type,},
+    def __call__(self, *args, **kwargs):
+        if not self.is_template:
+            return
+        return ColumnDefinition(
+            args[0], self.type, self.min, self.sep, self.max, template=False
         )
 
 
-class BaseCell:
-    values: "List[ValueType]"
-    separator: chr = UNIT
-
-    def __init__(
-        self,
-        column_name: str,
-        max_length: int = sys.maxsize,
-        min_length: int = -1,
-        tab_separator: bool = False,
-        **_options,
-    ):
-        if tab_separator:
-            self.separator = "\t"
-        self.max_length = max_length
-        self.min_length = min_length
-        pass
-
-    def __str__(self):
-        return self.separator.join([str(v) for v in self.values])
-
-    @property
-    def is_valid(self) -> bool:
-        return self.min_length < len(self.values) < self.max_length
-
-
-@dataclass
-class BaseValue(abc.ABC):
-    def __init__(self, value, **_others):
-        self.value = value
-
-    def __str__(self):
-        """
-        :return: A string representing the value compatible with BSV files
-        """
-        return str(self.value)
-
-    @staticmethod
-    @abc.abstractmethod
-    def from_str(value: str) -> "ValueType":
-        ...
-
-
-class StringValue(BaseValue):
-    @staticmethod
-    def from_str(value: str) -> "StringValue":
-        return StringValue(value)
-
-
-class IntegerValue(BaseValue):
-    @staticmethod
-    def from_str(value: str):
-        return IntegerValue(int(value))
-
-
-class RelativeDatetimeValue(BaseValue):
+class RelativeDatetimeValue:
     def __init__(self, unit: chr, distance: int):
         self.distance = distance
         self.unit = unit.upper()
@@ -145,7 +117,7 @@ class RelativeDatetimeValue(BaseValue):
             return dt + self.distance
 
 
-class CurrencyValue(BaseValue):
+class CurrencyValue:
     def __init__(self, amount: str, code: str, precision: str):
         super().__init__(Decimal(amount))
 
@@ -153,5 +125,4 @@ class CurrencyValue(BaseValue):
         ...
 
 
-ColumnType = TypeVar("ColumnType", bound=BaseCell)
-ValueType = TypeVar("ValueType", bound=BaseValue)
+ColumnType = TypeVar("ColumnType", bound=ColumnDefinition)

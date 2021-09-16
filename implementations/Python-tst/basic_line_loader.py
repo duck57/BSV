@@ -33,7 +33,7 @@ class TestTests(unittest.TestCase):
         The short buffer exercises how the loader handles lines that span reads
         """
         with open(f) as opened_file:
-            for z in read_next_line_from_file(opened_file, 40):
+            for z in _split_file_into_rows(opened_file, 40):
                 print(z)
                 self.assertIn(z.ending, LINE_BREAKS)
 
