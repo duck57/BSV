@@ -1,3 +1,4 @@
+import abc
 import dataclasses
 from copy import deepcopy
 from itertools import zip_longest
@@ -110,46 +111,44 @@ def _split_file_into_rows(
 
 
 class TableRow(abc.ABC):
-    def is_valid(self):
-        # TODO: rewrite this to work with dataclasses
-        pass
+    """
+    Mostly-empty class to serve as a base class for all rows read from a BSV file.
 
-    @classmethod
-    def new_from_BSV(cls, *fields):
-        return cls.__init__(*fields)
+    These methods should be defined when creating the ns dict in new_table_type()
+    """
 
-    @property
-    def num_fields(self) -> int:
-        return len(self.__dataclass_fields__) - (1 if self.allow_extras else 0)
-
+    @abc.abstractmethod
     def __post_init__(self, *fields):
-        for col_num, (value, (c_name, c_type)) in enumerate(
-            zip(fields, self.columns.items())
-        ):
-            if value is not None:
-                value = value.split(c_type.sep)
-            elif not self.allow_short:
-                raise RowError(
-                    "Line too short",
-                    RECORD.join([str(f) for f in fields]),
-                    f"Only {col_num} column(s).",
-                )
-            self.__setattr__(
-                c_name, None if value is None else [c_type.type(v) for v in value]
-            )
-        if self.allow_extras:
-            self.extras = (
-                [] if fields[-1] is None else [x.split(UNIT) for x in fields[-1]]
-            )
-        else:
-            self.extras = None
+        ...
 
-        # pprint(self.__dict__)
-        pass
-
-    @property
+    @abc.abstractmethod
     def values(self):
-        return [getattr(self, x) for x in self.__dataclass_fields__]
+        ...
+
+
+def _post_init4bsv_row(self, *fields):
+    for col_num, (value, (c_name, c_type)) in enumerate(
+        zip(fields, self.columns.items())
+    ):
+        if value is not None:
+            value = value.split(c_type.sep)
+        elif not self.allow_short:
+            raise RowError(
+                "Line too short",
+                RECORD.join([str(f) for f in fields]),
+                f"Only {col_num} column(s).",
+            )
+        self.__setattr__(
+            c_name, None if value is None else [c_type.type(v) for v in value]
+        )
+    if self.allow_extras:
+        self.extras = [] if fields[-1] is None else [x.split(UNIT) for x in fields[-1]]
+    else:
+        self.extras = None
+
+
+def _values4bsv_row(self):
+    return [getattr(self, x) for x in self.__dataclass_fields__]
 
 
 def _column_repr__(self):
@@ -186,6 +185,9 @@ def new_table_type(
         "columns": {},
         "__repr__": _column_repr__,
         "column_names": _column_names,
+        "num_columns": len(columns),
+        "__post_init__": _post_init4bsv_row,
+        "values": _values4bsv_row,
     }
     # turn the columns into Dataclass fields
     for c in columns:
@@ -209,9 +211,9 @@ def new_table_from_raw_lines(
 ) -> "Type[RowType]":
     """
 
-    :param table_definition:
-    :param column_heads:
-    :return:
+    :param table_definition: RawLine with the basic table information
+    :param column_heads: RawLine containing the column setup information
+    :return: a new subclass of TableRow for this new table
     """
     # There clearly has to be a better way to split a string into
     # a list with meaningful order when not all components are present
@@ -252,26 +254,8 @@ def new_table_from_raw_lines(
     return new_table_type(table_definition.extract_table_name(), *columns, **tad)
 
 
-def new_table_from_BSV_header(
-    title: str, column_row: List[str], *options, **meta
-) -> "RowType":
-    a_s: bool = True in ["S" in o.upper() for o in options]
-    a_x: bool = True in ["X" in o.upper() for o in options]
-
-    columns = []
-    for c in column_row:
-        c_name, *c_attrs = c.split(UNIT)
-        if not c_attrs:
-            ...  # assume unlimited string
-        columns.append(ColumnDefinition(c_name))
-
-    return new_table_type(title, *columns, allow_short=a_s, allow_extras=a_x)
-
-
 def raw_line2dataclass(row_type: Type[RowType], data: RawLine, row_index: int = -1):
-    num_fields = len(row_type.__dataclass_fields__) - (
-        1 if row_type.allow_extras else 0
-    )
+    num_fields = row_type.num_columns
     d2 = deepcopy(data.content)
     if len(d2) > num_fields:
         if row_type.allow_extras:
@@ -279,13 +263,13 @@ def raw_line2dataclass(row_type: Type[RowType], data: RawLine, row_index: int = 
             d2 = d2[0:num_fields]
             o = row_type(*d2, x)
             o.__setattr__("row_index", row_index)
-        raise RowError(
-            "Too many fields!",
-            data,
-            f"{len(d2)} fields were provided for a table with {num_fields} in row {row_index} of the input file.",
-        )
-
-    if len(d2) < num_fields:
+        else:
+            raise RowError(
+                "Too many fields!",
+                data,
+                f"{len(d2)} fields were provided for a table with {num_fields} in row {row_index} of the input file.",
+            )
+    elif len(d2) < num_fields:
         # +1 for extra fields
         d2 += [None] * ((1 if row_type.allow_extras else 0) + num_fields - len(d2))
     o = row_type(*d2)
@@ -351,13 +335,11 @@ def raw_line2dict(row_type: Type[RowType], data: RawLine, row_index: int = -1):
     column definition.
     """
     meta = {"table_name": row_type.original_name, "row_index": row_index}
-    o = {None: None}
+    o = {None: []}
     for column_type, value in zip_longest(
         row_type.columns.values(), data.content, fillvalue=None
     ):
         if column_type is None:  # extra fields
-            if o[None] is None:
-                o[None] = []
             o[column_type].append(value.split(UNIT))
             continue
 
@@ -438,7 +420,7 @@ def read_file_into_rows(
             else:
                 last_ending = line.ending
             current_table = tables[table_name]
-            pprint(current_table)
+            pprint(current_table.__dict__)
             continue
 
         # read the row into an object (or collect an error)
