@@ -18,6 +18,7 @@ from typing import (
     Type,
 )
 import re
+from errors import *
 
 """
 Separated into a second file for shorter file lengths.
@@ -45,15 +46,15 @@ def is_valid_field(self: dataclasses.Field):
 
 class ColumnDefinition:
     def __init__(
-            self,
-            name: str,
-            data_type: Type = str,
-            max_vals: int = sys.maxsize,
-            sep: chr = UNIT,
-            min_vals: int = -1,
-            range_str: str = "",
-            template: bool = False,
-            **misc_attrs,
+        self,
+        name: str,
+        data_type: Type = str,
+        max_vals: int = sys.maxsize,
+        sep: chr = UNIT,
+        min_vals: int = -1,
+        range_str: str = "",
+        template: bool = False,
+        **misc_attrs,
     ):
         self.name = name
         self.type = data_type

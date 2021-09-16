@@ -1,6 +1,8 @@
 import abc
 import dataclasses
+import itertools
 from copy import deepcopy
+from enum import Enum, IntEnum
 from itertools import zip_longest
 from pprint import pprint
 from typing import Type, Tuple, Iterable, Iterator
@@ -104,10 +106,10 @@ def _split_file_into_rows(
 
     """
     yield out the final line
-    it's o[-1] to strip out the trailing newline
+    it's s[-1] to strip out the trailing newline
     r == "" at this point.
     """
-    yield RawLine(o[:-1], r, row_index, start_after)
+    yield RawLine(o + [s[:-1]], r, row_index, start_after)
 
 
 class TableRow(abc.ABC):
@@ -127,24 +129,35 @@ class TableRow(abc.ABC):
 
 
 def _post_init4bsv_row(self, *fields):
+    self.errors = ErrorList()
+    *fields, raw_extras, self.row_index = fields
+    self.extras = [x.split(UNIT) for x in raw_extras if x is not None]
     for col_num, (value, (c_name, c_type)) in enumerate(
         zip(fields, self.columns.items())
     ):
         if value is not None:
             value = value.split(c_type.sep)
-        elif not self.allow_short:
-            raise RowError(
-                "Line too short",
-                RECORD.join([str(f) for f in fields]),
-                f"Only {col_num} column(s).",
+        elif not self.allow_short and not self.errors:
+            self.errors.append(
+                RowTooShortError(
+                    "Line too short",
+                    fields,
+                    f"Only {col_num} column(s).",
+                    self.row_index,
+                    severity=ErrorSeverity.ROW_MALFORMATION,
+                )
             )
-        self.__setattr__(
-            c_name, None if value is None else [c_type.type(v) for v in value]
+        self.__setattr__(c_name, [c_type.type(v) for v in value] if value else None)
+    if self.extras and not self.allow_extras:
+        self.errors.append(
+            RowTooLongError(
+                "Too many fields!",
+                fields,
+                f"{len(self.extras)} fields were provided for a table with {len(self.columns)}",
+                self.row_index,
+                severity=ErrorSeverity.ROW_MALFORMATION,
+            )
         )
-    if self.allow_extras:
-        self.extras = [] if fields[-1] is None else [x.split(UNIT) for x in fields[-1]]
-    else:
-        self.extras = None
 
 
 def _values4bsv_row(self):
@@ -177,7 +190,7 @@ def new_table_type(
     """
     # prep work
     columns_as_fields: List[Tuple] = []
-    ns = {
+    ns = {  # class attributes
         "__name__": name,
         **ns,
         "allow_short": allow_short,
@@ -194,9 +207,11 @@ def new_table_type(
         n = "col_" + to_class_name(c.name)
         columns_as_fields.append((n, dataclasses.InitVar))
         ns["columns"][n] = c
-    if allow_extras:
-        columns_as_fields.append(("extras", dataclasses.InitVar))
-        ns["extras"] = True
+    columns_as_fields.append(("extras", dataclasses.InitVar[list]))
+    columns_as_fields.append(
+        ("row_index", dataclasses.InitVar[int], dataclasses.field(default=-1))
+    )
+
     # create the new class
     return dataclasses.make_dataclass(
         f"{name}_row", columns_as_fields, bases=(TableRow,), namespace=ns,
@@ -257,57 +272,10 @@ def new_table_from_raw_lines(
 def raw_line2dataclass(row_type: Type[RowType], data: RawLine, row_index: int = -1):
     num_fields = row_type.num_columns
     d2 = deepcopy(data.content)
-    if len(d2) > num_fields:
-        if row_type.allow_extras:
-            x: List = d2[num_fields:]
-            d2 = d2[0:num_fields]
-            o = row_type(*d2, x)
-            o.__setattr__("row_index", row_index)
-        else:
-            raise RowError(
-                "Too many fields!",
-                data,
-                f"{len(d2)} fields were provided for a table with {num_fields} in row {row_index} of the input file.",
-            )
-    elif len(d2) < num_fields:
-        # +1 for extra fields
-        d2 += [None] * ((1 if row_type.allow_extras else 0) + num_fields - len(d2))
-    o = row_type(*d2)
-    o.__setattr__("row_index", row_index)
+    x: List[str] = d2[num_fields:]
+    d2 = d2[:num_fields] + ([None] * (num_fields - len(d2)))
+    o = row_type(*d2, x, row_index)
     return o
-
-
-class InputError(ValueError):
-    def __init__(
-        self,
-        description: Optional[str] = "Incorrectly-formatted file",
-        row: Optional = None,
-        details: Optional[str] = "",
-        line_num: Optional[int] = None,
-        *_args,
-        **_kwargs,
-    ):
-        self.description = description
-        self.row = row
-        self.file_offset = row.starts_after if isinstance(row, RawLine) else None
-        self.details = details
-        self.line_num = line_num
-
-        super().__init__(str(self))
-
-    def __str__(self):
-        return f"{self.description}!\n{self.details}\n{self.row}"
-
-    def __repr__(self):
-        return f"{type(self).__name__}: {self.description} on line {self.line_num}.  {self.details}"
-
-
-class RowError(InputError):
-    pass
-
-
-class ColumnError(InputError):
-    pass
 
 
 def raw_line2dict(row_type: Type[RowType], data: RawLine, row_index: int = -1):
@@ -350,25 +318,11 @@ def raw_line2dict(row_type: Type[RowType], data: RawLine, row_index: int = -1):
     return o
 
 
-class ErrorList(list):
-    @property
-    def by_line(self):
-        ...
-
-    @property
-    def by_severity(self):
-        ...
-
-    @property
-    def by_type(self):
-        ...
-
-
 def read_file_into_rows(
     f,
-    errors: defaultdict = None,
+    errors: ErrorList = None,
     *,
-    strict: bool = True,
+    strictness: int = 75,
     into_dicts: bool = False,
     direct_iterator: Optional[Iterable[RawLine]] = None,
     buffer: int = io.DEFAULT_BUFFER_SIZE,
@@ -380,7 +334,7 @@ def read_file_into_rows(
     :param direct_iterator: alternate to f
     :param f: the BSV file-like object to read
     :param errors: writable
-    :param strict: stop processing and raise an exception at any error?
+    :param strictness: stop processing and raise an exception at any error?
     :param into_dicts: Read the file into dicts?  If not, each table generates a
     subtype of dataclass in which the results are stored.
     :return: yields either a dict or a dataclass for each row of the input file
@@ -392,12 +346,14 @@ def read_file_into_rows(
         direct_iterator
     ) if direct_iterator else _split_file_into_rows(f, buffer)
     if errors is None:
-        errors = defaultdict(list)
+        errors = ErrorList()
     conversion_function = raw_line2dict if into_dicts else raw_line2dataclass
     current_table: Type[RowType] = type(
         RowType
     )  # this assignment is to make the linter shut up later
     tables: Dict[str, Type[RowType]] = {}
+    if not strictness:
+        strictness = 998
 
     # the actual processing loop
     for line in rows:
@@ -407,32 +363,29 @@ def read_file_into_rows(
         # read table header
         # also covers the empty string at the start of reading
         if last_ending in FILE:
-            print("next table!")
+            # print("next table!")
             table_name = line.extract_table_name()
             if table_name not in tables.keys():  # define a new table
-                """
-                next(rows) is called here and not in new_table() so
-                that last_ending may be properly set
-                """
+                # next(rows) is called here and not in new_table() so
+                # that last_ending may be properly set
                 column_headers: RawLine = next(rows)
+
                 tables[table_name] = new_table_from_raw_lines(line, column_headers)
                 last_ending = column_headers.ending
             else:
                 last_ending = line.ending
             current_table = tables[table_name]
-            pprint(current_table.__dict__)
+            # pprint(current_table.__dict__)
             continue
 
         # read the row into an object (or collect an error)
-        try:
-            yield conversion_function(current_table, line, line.row_index)
-        except InputError as e:
-            errors[line.row_index].append((e, line,))
-            if strict:
+        o = conversion_function(current_table, line, line.row_index)
+        # handle errors
+        errors.extend(o.errors)
+        for e in o.errors:
+            if e.severity > strictness:
                 raise e
-            else:
-                pass
-
+        yield o  # congratulations, we've parsed a new row!
         # save the ending for reading the next line
         last_ending = line.ending
 
