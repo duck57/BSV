@@ -159,12 +159,15 @@ Only the field name is required.  Each header is separated with `\x1F`.
 
 The separator (and preceding hyphen) are optional characters which change the
 separator between values in a column from the default UNIT SEPARATOR to
-something easier for human editing.
+something easier for human editing.  Implementations should only consider the
+first character of `sep`.
 
 * `t` = tab-separated values
 * `s` = space-delimited values (only valid for integers, floats, and relative
   datetime: all other types fall back to `\x1F`)
+* `u` = unit separator
 * anything else falls back to the unit separator
+* This list may be expanded at a later date, but that is unlikely.
 
 This is entirely ignored for columns with a String (or default) data hint.
 
