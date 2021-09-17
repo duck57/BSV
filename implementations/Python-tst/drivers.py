@@ -13,7 +13,18 @@ def test_reading(
 ):
     with open(file_name) as f:
         e = ErrorList()
-        for row in read_file_into_rows(f, e, strictness=False, into_dicts=i_d):
+        for row in read_file_into_rows(
+            f,
+            e,
+            into_dicts=i_d,
+            acceptable_errors=[
+                InputError,
+                # TooLongError,
+                # TooShortError,
+                # LengthError,
+                # ValueTypeError,
+            ],
+        ):
             pprint(row)
         pprint(e)
 

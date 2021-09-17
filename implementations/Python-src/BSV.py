@@ -10,6 +10,8 @@ from collections import defaultdict
 from columns import *
 import io
 
+from columns import _make_header_str
+
 """
 """
 
@@ -135,9 +137,7 @@ def _post_init4bsv_row(self, *fields):
     for col_num, (value, (c_name, c_type)) in enumerate(
         zip(fields, self.columns.items())
     ):
-        if value is not None:
-            value = value.split(c_type.sep)
-        elif not self.allow_short and not self.errors:
+        if value is None and not self.allow_short and not self.errors:
             self.errors.append(
                 RowTooShortError(
                     "Line too short",
@@ -147,13 +147,13 @@ def _post_init4bsv_row(self, *fields):
                     severity=ErrorSeverity.ROW_MALFORMATION,
                 )
             )
-        self.__setattr__(c_name, [c_type.type(v) for v in value] if value else None)
+        self.__setattr__(c_name, c_type(value, self.errors, self.row_index))
     if self.extras and not self.allow_extras:
         self.errors.append(
             RowTooLongError(
                 "Too many fields!",
                 fields,
-                f"{len(self.extras)} fields were provided for a table with {len(self.columns)}",
+                f"{len(self.extras)} extra fields were provided for a table with {len(self.columns)}.",
                 self.row_index,
                 severity=ErrorSeverity.ROW_MALFORMATION,
             )
@@ -172,15 +172,64 @@ def _column_names(cls) -> List[str]:
     return [c.name for c in cls.columns.values()]
 
 
+def _2bsv_str(self, fill: bool = True, trim: bool = True) -> str:
+    o: List[str] = []
+    for c_name, c_def in self.columns.items():
+        v = getattr(self, c_name, None)
+        if v is None:
+            if not fill:
+                continue
+            v = ""
+        o.append(c_def.to_str(v))
+    if not trim and self.extras:
+        o.append(RECORD.join(UNIT.join(s for s in z) for z in self.extras))
+    return RECORD.join(o)
+
+
+def _literal_str(self) -> str:
+    """__str__ but does not care about table length definitions"""
+    return _2bsv_str(self, False, False)
+
+
+def _semi_valid_str(self) -> str:
+    """Does not enforce column-level validity"""
+    return _2bsv_str(self, True, True)
+
+
+def _table_definition_str(cls) -> str:
+    """The opposite of new_table_from_raw_lines
+
+    :return: a string that will generate the RowType
+    """
+    pprint([c.definition_string for c in cls.columns.values()])
+    return (
+        _make_header_str(
+            [
+                cls.original_name,  # name
+                ("X" if cls.allow_extras else "")
+                + ("S" if cls.allow_short else ""),  # options
+                getattr(cls, "comment", None),  # comment
+                getattr(cls, "client", None),  # client
+            ]
+            + cls.extra_headers,
+            RECORD,
+        )
+        + GROUP
+        + RECORD.join([c.definition_string for c in cls.columns.values()])
+    )
+
+
 def new_table_type(
     name: str,
     *columns: ColumnDefinition,
     allow_short: bool = False,
     allow_extras: bool = False,
+    error_collector: Optional[ErrorList] = None,
     **ns,
 ) -> "Type[RowType]":
     """Creates a new Class to contain rows from a table
 
+    :param error_collector: a place to collect errors
     :param name: The name of the table.  Gets changed to "Name_row" in the output
     :param columns: Any number of ColumnDefinitions in order of the table's columns
     :param allow_short: Consider short rows to be valid
@@ -201,9 +250,17 @@ def new_table_type(
         "num_columns": len(columns),
         "__post_init__": _post_init4bsv_row,
         "values": _values4bsv_row,
+        "semi_validated_str": _semi_valid_str,
+        "raw_bsv_str": _literal_str,
+        "table_str": _table_definition_str,
     }
     # turn the columns into Dataclass fields
     for c in columns:
+        if isinstance(c, ColumnTemplate):
+            c: ColumnDefinition = c(c.name)
+            add_error2el(
+                ColumnError("Attempted use of template column"), error_collector
+            )
         n = "col_" + to_class_name(c.name)
         columns_as_fields.append((n, dataclasses.InitVar))
         ns["columns"][n] = c
@@ -243,7 +300,7 @@ def new_table_from_raw_lines(
         if attr == "extras":
             break  # handle these a line later
         tad[attr] = value
-    tad["extras"] = table_definition.content[4:]
+    tad["extra_headers"] = table_definition.content[4:]
     tad["allow_short"] = "S" in tad["options"].upper()
     tad["allow_extras"] = "X" in tad["options"].upper()
 
@@ -253,9 +310,9 @@ def new_table_from_raw_lines(
             "name": "",  # 0
             "data_hint": "",  # 1
             "range": "",  # 2
-            "comment": "",  # 3
+            "comment": None,  # 3
             "client": None,  # 4
-            "extras": [],  # 5
+            "extra_headers": [],  # 5
         }
         col_attrs: List[str] = raw_c.split(UNIT)
         for attr, value in zip(c_attrs.keys(), col_attrs):
@@ -322,13 +379,15 @@ def read_file_into_rows(
     f,
     errors: ErrorList = None,
     *,
-    strictness: int = 75,
+    strictness: int = 23,
     into_dicts: bool = False,
     direct_iterator: Optional[Iterable[RawLine]] = None,
+    acceptable_errors: List[Type[InputError]] = None,
     buffer: int = io.DEFAULT_BUFFER_SIZE,
 ):
     """Where all the magic occurs.  Reads the file into dataclasses or dicts.
 
+    :param acceptable_errors: a list of types of acceptable error rather than a numeric value guess
     :param buffer: controls how much of the file to read at a times.
     No need to adjust this under normal circumstances.
     :param direct_iterator: alternate to f
@@ -347,6 +406,8 @@ def read_file_into_rows(
     ) if direct_iterator else _split_file_into_rows(f, buffer)
     if errors is None:
         errors = ErrorList()
+    if acceptable_errors is None:
+        acceptable_errors = []
     conversion_function = raw_line2dict if into_dicts else raw_line2dataclass
     current_table: Type[RowType] = type(
         RowType
@@ -375,7 +436,6 @@ def read_file_into_rows(
             else:
                 last_ending = line.ending
             current_table = tables[table_name]
-            # pprint(current_table.__dict__)
             continue
 
         # read the row into an object (or collect an error)
@@ -383,7 +443,9 @@ def read_file_into_rows(
         # handle errors
         errors.extend(o.errors)
         for e in o.errors:
-            if e.severity > strictness:
+            if e.severity > strictness and not any(
+                isinstance(e, a) for a in acceptable_errors
+            ):
                 raise e
         yield o  # congratulations, we've parsed a new row!
         # save the ending for reading the next line

@@ -23,6 +23,11 @@
 * Year (`dateutil` implementation): `months = round(12*r)` when `0.9 > r % 1 >
   0.1`.  Otherwise, round to days.
 
-# Style considerations
+# Help Wanted
+
+* Suggest and/or write tests
+* How to organize the files?
+
+## Style considerations
 
 Please use `black` to format your files before committing.

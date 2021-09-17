@@ -7,6 +7,7 @@ from pprint import pprint
 
 class ErrorSeverity(IntEnum):
     FATAL = 999
+    BAD_COLUMN_HEADER = 151
     ROW_MALFORMATION = 88
     INCORRECT_DATA_TYPE = 66
     WRONG_NUMBER_VALUES = 50
@@ -15,6 +16,7 @@ class ErrorSeverity(IntEnum):
 
 class InputError(ValueError):
     type: str = "Input Error"
+    severity = ErrorSeverity.INFO
 
     def __init__(
         self,
@@ -22,7 +24,6 @@ class InputError(ValueError):
         row: Optional = None,
         details: Optional[str] = "",
         line_num: Optional[int] = None,
-        severity=ErrorSeverity.INFO,
         *_args,
         **_kwargs,
     ):
@@ -31,7 +32,6 @@ class InputError(ValueError):
         self.file_offset = row.starts_after if hasattr(row, "starts_after") else None
         self.details = details
         self.line_num = line_num
-        self.severity = severity
 
         super().__init__(str(self))
 
@@ -44,10 +44,12 @@ class InputError(ValueError):
 
 class RowError(InputError):
     type = "Row"
+    severity = ErrorSeverity.ROW_MALFORMATION
 
 
 class ColumnError(InputError):
     type = "Column"
+    severity = ErrorSeverity.BAD_COLUMN_HEADER
 
 
 class LengthError(InputError):
@@ -62,22 +64,41 @@ class TooShortError(LengthError):
     type = "Too Short"
 
 
-class WrongValueType(ColumnError):
+class ValueTypeError(ColumnError):
     type = "Incorrect Input Type"
+    severity = ErrorSeverity.INCORRECT_DATA_TYPE
 
 
-"""
-Dynamically create error classes
-"""
-for span, direction in itertools.product(
-    [RowError, ColumnError], [TooLongError, TooShortError]
-):
-    _e = type(
-        f"{span.type.replace(' ', '')}{direction.type.replace(' ', '')}Error",
-        (span, direction),
-        {"type": f"{span.type} {direction.type}"},
-    )
-    globals()[_e.__name__] = _e
+# """
+# Dynamically create error classes
+# """
+# for span, direction in itertools.product(
+#     [RowError, ColumnError], [TooLongError, TooShortError]
+# ):
+#     _e = type(
+#         f"{span.type.replace(' ', '')}{direction.type.replace(' ', '')}Error",
+#         (span, direction),
+#         {"type": f"{span.type} {direction.type}"},
+#     )
+#     globals()[_e.__name__] = _e
+
+
+class RowTooLongError(TooLongError, RowError):
+    type = "Row Too Long"
+
+
+class RowTooShortError(TooShortError, RowError):
+    type = "Row Too Short"
+
+
+class TooFewValuesError(TooShortError, ColumnError):
+    type = "Too Few Values"
+    severity = ErrorSeverity.WRONG_NUMBER_VALUES
+
+
+class TooManyValuesError(TooShortError, ColumnError):
+    type = "Too Many Values"
+    severity = ErrorSeverity.WRONG_NUMBER_VALUES
 
 
 class ErrorList(List[InputError]):
@@ -96,3 +117,9 @@ class ErrorList(List[InputError]):
     def extend(self, list_of_errors: Iterable[InputError]) -> None:
         for e in list_of_errors:
             self.append(e)
+
+
+def add_error2el(error: InputError, el: Optional[ErrorList] = None):
+    if el is None:
+        raise error
+    el.append(error)
