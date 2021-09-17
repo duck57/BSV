@@ -155,6 +155,34 @@ Only the field name is required.  Each header is separated with `\x1F`.
 5. Client
 6. Extras…
 
+### Range configurations
+
+While there is no enforced limit to the values of `min`, the only sensible ones
+are 0 and 1. Rather than have a range of `6--14`, it may be more sensible to
+have six columns with range `1-1` and an overflow column of range `--8`.
+
+TODO: really provide this much flexibility or just require the 3 value scenario?
+
+#### All 3 values (2 separations)
+
+* `min-sep-max`
+* `--max`
+* `min--`
+* `-sep-max`
+* `-sep-`
+* `--`
+* `min--max`
+* `min-sep-`
+
+#### 2 values `min-max`
+
+No separator customization may be made in this configuration.
+
+#### Single value `x`
+
+* If `x` is numeric, `x` is `max`
+* Otherwise, `x` is `sep`
+
 ### Notes on `sep`
 
 The separator (and preceding hyphen) are optional characters which change the
