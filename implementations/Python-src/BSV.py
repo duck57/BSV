@@ -279,7 +279,7 @@ RowType = TypeVar("RowType", bound=TableRow)
 
 
 def new_table_from_raw_lines(
-    table_definition: RawLine, column_heads: RawLine
+    table_definition: RawLine, column_heads: RawLine, el: Optional[ErrorList] = None
 ) -> "Type[RowType]":
     """
 
@@ -308,8 +308,8 @@ def new_table_from_raw_lines(
     for raw_c in column_heads.content:
         c_attrs = {
             "name": "",  # 0
-            "data_hint": "",  # 1
-            "range": "",  # 2
+            "data_type": "",  # 1
+            "range_str": "",  # 2
             "comment": None,  # 3
             "client": None,  # 4
             "extra_headers": [],  # 5
@@ -320,6 +320,7 @@ def new_table_from_raw_lines(
                 break
             c_attrs[attr] = value
         c_attrs["extras"] = col_attrs[5:]
+        c_attrs["el"] = el
 
         columns.append(ColumnDefinition(**c_attrs))
 

@@ -269,9 +269,9 @@ Should this be unspecified?
 
 First, some examples:
 
-1. C0`\x1F`3 BHD _one required Bahrain dinar amount_
-2. C\*t`\x1F`2 USD _multiple US dollar amounts separated by tabs_
-3. C2`\x1F`8 _up to 2 amounts of unspecified currency with 8 digits after the
+1. C 3 BHD _one required Bahrain dinar amount_
+2. C 2 USD _multiple US dollar amounts separated by tabs_
+3. C 8 _up to 2 amounts of unspecified currency with 8 digits after the
    decimal separated by the unit separator_
 
 Note how currency fields require an additional `\x1F` followed by an integer.

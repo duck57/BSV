@@ -1,6 +1,6 @@
 strict table
-Unlimited stringtab-separated intI*tRequired currencyC02 USDUp to 2 relative datesE2
-ValidRow1	212.345 BHD3w+4.5
+Unlimited stringtab-separated intI1-t-Required currencyC 2 USD1-1Up to 2 relative datesE-2
+ValidRow1	212.345 3 BHDw+4.5
 Tooshort
 Toolong6	9	4204.20t+3h-1:23extra	field (1)extra field2
 Wrongseparator89100.00

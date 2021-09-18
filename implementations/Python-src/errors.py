@@ -69,20 +69,6 @@ class ValueTypeError(ColumnError):
     severity = ErrorSeverity.INCORRECT_DATA_TYPE
 
 
-# """
-# Dynamically create error classes
-# """
-# for span, direction in itertools.product(
-#     [RowError, ColumnError], [TooLongError, TooShortError]
-# ):
-#     _e = type(
-#         f"{span.type.replace(' ', '')}{direction.type.replace(' ', '')}Error",
-#         (span, direction),
-#         {"type": f"{span.type} {direction.type}"},
-#     )
-#     globals()[_e.__name__] = _e
-
-
 class RowTooLongError(TooLongError, RowError):
     type = "Row Too Long"
 
