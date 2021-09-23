@@ -199,7 +199,13 @@ first character of `sep`.
 
 This is entirely ignored for columns with a String (or default) data hint.
 
-## Supported data hints 
+## Supported data hints
+
+Levels of completeness for implementations (only the first is required):
+
+1. Read/write from BSV into memory (dict/map of lists of values)
+2. Length validation
+3. Type conversion & validations
 
 ### String: `S`
 
