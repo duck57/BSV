@@ -10,6 +10,12 @@ class ValueTests(unittest.TestCase):
     def test_str(self):
         ...
 
+    def test_generic_int(self):
+        # Note that class ExactlyOneInt is created at runtime during the import of columns.py
+        single_int = ExactlyOneInt("test int")
+        self.assertEqual(42, single_int(["42"])[0])
+        self.assertRaises(TooManyValuesError, single_int, ["0", 0, 0.00])
+
 
 if __name__ == "__main__":
     unittest.main()

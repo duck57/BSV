@@ -3,30 +3,28 @@ from __future__ import annotations
 import abc
 import dataclasses
 import decimal
-import itertools
+import re
 import sys
-from dataclasses import make_dataclass, dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
-from typing import (
-    NamedTuple,
-    Generator,
-    Dict,
-    Callable,
-    TypeVar,
-    Any,
-    List,
-    Optional,
-    Type,
-    Union,
-)
-import re
+
 from errors import *
 
 """
-Separated into a second file for shorter file lengths.
-May be re-integrated in a future commit.
+Classes and function for handling data validation in BSV files.
+
+Plus some other definitions that are re-used in BSV.py
+
+
+NOTE: importing this module also creates classes with names
+starting with 'ExactlyOne', 'AtLeastOne', etc… into the global
+namespace.  It is so you can use commands like 
+
+>>> optional_dollar = AtMostOneCurrency('Optional Dollar Amount', '2 USD')
+
+to create column definitions with commonly-used patterns.
+Your IDE, however, may not like using these and complain about
+names not being defined.
 """
 
 # FILE and GROUP are defined here
@@ -49,7 +47,17 @@ def _make_header_str(headers: List[Optional[str]], sep: chr):
 
 
 class ColumnDefinition:
+    """
+    Class which defines a column.
+
+    Once an instance has been created, the instance is callable.
+    Calling the instance will convert the input list into a list of
+    values that match the column type, rather than remaining as mere
+    strings.
+    """
+
     is_template: bool = True
+    DataHints: "Dict[Union[chr, Type], Type[BaseValue]]" = {}
 
     def __init__(
         self,
@@ -57,7 +65,7 @@ class ColumnDefinition:
         data_type: Union[Type, str] = str,
         max_vals: int = sys.maxsize,
         sep: chr = UNIT,
-        min_vals: int = -1,
+        min_vals: int = 0,
         range_str: str = "",
         currency_code: str = "XXX",
         decimal_places: int = 3,
@@ -71,7 +79,9 @@ class ColumnDefinition:
             data_type, data_hint = data_type[0], data_type[1:-1].split()
             if data_type == "C":
                 currency_code, decimal_places = data_hint[1], int(data_hint[0])
-        self.type = DataHintDict.get(data_type, StringWrapper)
+        self.type = self.DataHints.get(data_type)
+        if self.type is None:
+            self.type = StringWrapper
         self.currency_code, self.currency_precision = currency_code, decimal_places
 
         # override provided min-sep-max if range_str is provided
@@ -91,7 +101,7 @@ class ColumnDefinition:
                     int("0" + range_str[0]),
                     int(range_str[-1]) if range_str[-1] else max_vals,
                 )
-            except ValueError as e:
+            except ValueError:
                 # yes, both min and max will fail to set if one of them
                 # is not an integer in the range string
                 add_error2el(
@@ -106,11 +116,17 @@ class ColumnDefinition:
             sep = range_str[1]
         if range_str:
             sep = {"u": UNIT, "t": TAB, "s": " "}[(sep + "u").lower()[0]]
-        if sep == " " and self.type not in []:
+        if (
+            sep == " "
+            and not self.type.space_separable
+            or sep == "\t"
+            and not self.type.tab_separable
+        ):
+            sep = {" ": "Spaces", "\t": "Tabs"}.get(sep, "Invalid separators")
             add_error2el(
                 ColumnError(
                     "Incorrect separator+datatype combo",
-                    details=f"Spaces are not allowed for rows of type {self.type}",
+                    details=f"{sep} are not allowed for rows of type {self.type}",
                 )
             )
             sep = UNIT
@@ -118,8 +134,6 @@ class ColumnDefinition:
         self.max = max_vals
         self.min = min_vals
         self.sep = sep
-
-        # print(self.name, self.range_string)
 
         for a, v in misc_attrs.items():
             self.__setattr__(a, v)
@@ -138,7 +152,7 @@ class ColumnDefinition:
         return _make_header_str(
             [
                 self.name,
-                self.type.dh_chr,
+                self.type.dh_chr,  # noqa  set with setattr in __init_subclass__
                 self.range_string,
                 getattr(self, "comment", None),
                 getattr(self, "client", None),
@@ -149,7 +163,7 @@ class ColumnDefinition:
 
     @property
     def dataclass_field(self) -> dataclasses.Field:
-        return field(
+        return dataclasses.field(
             default=None,
             metadata={
                 "original_name": self.name,
@@ -165,10 +179,10 @@ class ColumnDefinition:
     ) -> Optional[List]:
         """Converts the input string into a list of values
 
-        :param in_vals:
-        :param el:
-        :param line_num:
-        :return:
+        :param in_vals: the value(s) to convert
+        :param el: optional error list for error collection
+        :param line_num: line number for debugging and error messages
+        :return: The list of values converted into their respective datatype
         """
         if in_vals is None:
             return in_vals
@@ -201,79 +215,174 @@ class ColumnDefinition:
 
     def is_valid(self, vals: List) -> bool:
         return (
-            all(isinstance(v, self.type.wraps) for v in vals)
+            all(
+                isinstance(v, self.type.wraps) for v in vals  # noqa
+            )  # type.wraps is set in __init_subclass__ during type creation
             and self.min <= len(vals) <= self.max
         )
 
 
 class ColumnTemplate(ColumnDefinition):
-    is_template = True
+    """
+    Template for other column definitions.
 
-    def __call__(self, column_name: str, **kwargs) -> ColumnDefinition:
+    Calling an instance of this class will create a column in the instance's
+    image with the specified name.
+
+    Class methods at_least, at_most, etc… are convenience wrappers for
+    _meta_template.
+    """
+
+    is_template = True
+    generic_ranges: Dict[str, Callable[[Any, str], ColumnTemplate]] = {}
+    template_ready_types: Dict[str, Type] = {}
+
+    def __call__(
+        self, column_name: str, currency_string: str = "", el=None, **kwargs
+    ) -> ColumnDefinition:
         """
         :param column_name: the name of the new ColumnDefinition to return
+        :param currency_string: the "2 USD" precision and currency code specification
+        to be used in currency columns
+        :param el: optional ErrorList for catching errors during column creation
         :param kwargs: junk to maintain class hierarchy compatibility
         :return: A ColumnDefinition based on self
         """
-        return ColumnDefinition(column_name, self.type, self.min, self.sep, self.max)
-
-    @staticmethod
-    def at_least_range(min_: int) -> str:
-        return f"{min_}-"
-
-    @staticmethod
-    def at_least(min_: int, type_) -> ColumnTemplate:
-        return ColumnTemplate(
-            f"at least {min_} {type_}", min_vals=min_, data_type=type_
+        if currency_string:
+            precision, code = currency_string.split()
+            currency_info = {"currency_code": code, "decimal_places": int(precision)}
+        else:
+            currency_info = {}
+        return ColumnDefinition(
+            column_name,
+            self.type,
+            self.max,
+            self.sep,
+            self.min,
+            **currency_info,
+            el=el,
         )
 
     @staticmethod
-    def at_most(max_: int, type_) -> ColumnTemplate:
-        return ColumnTemplate(f"at most {max_} {type_}", max_vals=max_, data_type=type_)
+    def _add_generic_template_to_globals(
+        quantity_prefix: str,
+        meta_template: Callable[[Any], ColumnTemplate],
+        type_name: str,
+        column_type,
+    ):
+        """Injects generic templates into the global namespace for client modules to use
 
-    @staticmethod
-    def at_most_range(max_: int) -> str:
-        return f"-{max_}"
+        > ColumnTemplate._add_generic_template_to_globals("Single", ColumnTemplate.OnlyOne, "Int", int)
 
-    @staticmethod
-    def between_range(min_: int, max_: int) -> str:
-        return f"{min_}-{max_}"
+        Clients may now use SingleInt() as a template to create their specific columns
+        """
+        template = meta_template(column_type)
+        globals()[quantity_prefix + type_name] = template
 
-    @staticmethod
-    def between(min_: int, max_: int, type_) -> ColumnTemplate:
-        return ColumnTemplate(
-            f"between {min_} and {max_} {type_}",
-            data_type=type_,
-            min_vals=min_,
-            max_vals=max_,
-        )
+    @classmethod
+    def register_meta_template(cls, name: str, template_creation_function: Callable):
+        """Register a meta template and then inject concrete generic templates into globals()"""
+        cls.generic_ranges[name] = template_creation_function
+        for type_name, type_ in cls.template_ready_types.items():
+            cls._add_generic_template_to_globals(
+                name, template_creation_function, type_name, type_
+            )
+
+    @classmethod
+    def _meta_template(
+        cls,
+        name_stem: str,
+        min_: Optional[int] = None,
+        max_: Optional[int] = None,
+        _type_=None,
+    ) -> ColumnTemplate | Callable[[Any, str], ColumnTemplate]:
+        """Creation function for generic ColumnTemplates (used during module import)
+
+        :param name_stem: The opening part of the class names for concrete
+        generic column templates, typically a quantity, like `Several` or
+        `ExactlyTwo`
+        :param min_: minimum number of values in the column, typically 0 or 1
+        :param max_: maximum number of values in the column, typically 1 or None
+        :param _type_: setting a type will return a concrete generic ColumnTemplate
+        instance of this type.  Leaving it None will return the function.
+        :return: Either a concrete instance of a generic ColumnTemplate or
+        a function which will create generic ColumnTemplates
+        """
+
+        def create_generic_template(type_, n: str,) -> ColumnTemplate:
+            """Creates a concrete instance of a generic ColumnTemplate.
+
+            :param type_: The type of column to create
+            :param n: Same as name_stem in the outer function
+            :return: A generic ColumnTemplate with min and max set by the
+            outer function.
+            """
+            args = {"data_type": type_}
+            if min_ is not None:
+                args["min_vals"] = min_
+                n += f" {min_}"
+            if max_ is not None:
+                args["max_vals"] = max_
+                if max_ != min_:
+                    n += f" and {max_}"
+            n += f" {type_ if isinstance(type_, str) else type_.__name__}"
+            return ColumnTemplate(n, **args)
+
+        if _type_:  # template for a concrete type
+            return create_generic_template(_type_, name_stem)
+
+        def _new_template(type_) -> ColumnTemplate:
+            return create_generic_template(type_, name_stem)
+
+        return _new_template
+
+    @classmethod
+    def at_least(cls, min_: int, type_=None):
+        return cls._meta_template("at least", min_, None, type_)
+
+    @classmethod
+    def at_most(cls, max_: int, type_=None):
+        return cls._meta_template("at most", None, max_, type_)
+
+    @classmethod
+    def between(cls, min_: int, max_: int, type_=None):
+        return cls._meta_template("between", min_, max_, type_)
+
+    @classmethod
+    def exactly(cls, number: int, type_=None):
+        return cls._meta_template("exactly", number, number, type_)
+
+    @classmethod
+    def unlimited(cls, type_=None):
+        return cls._meta_template("unlimited", None, None, type_)
+
+    @classmethod
+    def create_templates4type(cls, col_type: Type[BaseValue]):
+        cls.template_ready_types[col_type.short_name] = col_type
+        for r_name, r_fun in cls.generic_ranges.items():
+            cls._add_generic_template_to_globals(
+                r_name, r_fun, col_type.short_name, col_type
+            )
 
 
-DataHintDict: "Dict[Union[chr, Type], Type[BaseValue]]" = {}
-_TemplateRangeDict: Dict[str, str] = {
-    "AtLeastOne": ColumnTemplate.at_least_range(1),
-    "AtMostOne": ColumnTemplate.at_most_range(1),
-    "ExactlyOne": ColumnTemplate.between_range(1, 1),
-    "Unlimited": "",
-}
-_TemplateTypeDict: Dict[str, Type] = {
-    "String": str,
-    "Int": int,
-    "Float": float,
-    # "Money": CurrencyValue,
-    # "Date": ,
-    # "Time": ,
-    # "RelativeTime": RelativeDatetimeValue,
-    # "Fraction": ,
-}
-for (range_name, range_string), (type_name, type_type) in itertools.product(
-    _TemplateRangeDict.items(), _TemplateTypeDict.items()
-):
-    ...  # generate ColumnTemplates
-    # print(f"{range_name}{type_name}")
+# Not defined in the ColumnTemplate class due to initialization issues during import
+for prefix, quant in {
+    "AtLeastOne": ColumnTemplate.at_least(1),
+    "SingleOptional": ColumnTemplate.at_most(1),
+    "AtMostOne": ColumnTemplate.at_most(1),
+    "ExactlyOne": ColumnTemplate.exactly(1),
+    "Unlimited": ColumnTemplate.unlimited(),
+}.items():
+    ColumnTemplate.register_meta_template(prefix, quant)
 
 
 class BaseValue(abc.ABC):
+    tab_separable: bool = True
+    space_separable: bool = False
+    wraps: Type = None
+    dh_chr: chr = ""
+    short_name: str = ""
+
     @staticmethod
     @abc.abstractmethod
     def from_str(
@@ -285,7 +394,12 @@ class BaseValue(abc.ABC):
     ):
         ...
 
-    def __init_subclass__(cls, hint: str = None, wraps: Type = None, **kwargs):
+    # should some of this be done with a metaclass instead?
+    # make wraps, short_name, and hint class attributes that are parsed
+    # by the __new__ of the metaclass as an alternate strategy
+    def __init_subclass__(
+        cls, hint: chr = "", wraps: Type = None, short_name: str = None, **kwargs,
+    ):
         """
         Adds the new class to register its type handling.
         Useful for extending this module and overriding a class.
@@ -294,17 +408,28 @@ class BaseValue(abc.ABC):
         on the standard library.
         """
         super().__init_subclass__(**kwargs)
-        DataHintDict[cls] = cls
+        ColumnDefinition.DataHints[cls] = cls
+
         if hint:
-            DataHintDict[hint.upper()] = cls
-        if wraps:
-            DataHintDict[wraps] = cls
-            setattr(cls, "wraps", wraps)
+            ColumnDefinition.DataHints[hint.upper()] = cls
+            cls.dh_chr = hint
         else:
-            setattr(cls, "wraps", cls)
+            raise KeyError(f"{cls.__name__} is missing a data hint")
+
+        if wraps:
+            ColumnDefinition.DataHints[wraps] = cls
+            cls.wraps = wraps
+        else:
+            cls.wraps = cls
+
+        if short_name:
+            cls.short_name = short_name
+            ColumnTemplate.create_templates4type(cls)
 
 
-class IntWrapper(BaseValue, hint="I", wraps=int):
+class IntWrapper(BaseValue, hint="I", wraps=int, short_name="Int"):
+    space_separable = True
+
     @staticmethod
     def from_str(
         value: str,
@@ -324,7 +449,7 @@ class IntWrapper(BaseValue, hint="I", wraps=int):
                 error_list,
             )
             return x
-        except ValueError as e:
+        except ValueError:
             add_error2el(
                 ValueTypeError(
                     f"Not a number",
@@ -337,7 +462,9 @@ class IntWrapper(BaseValue, hint="I", wraps=int):
             return value
 
 
-class FloatWrapper(BaseValue, hint="D", wraps=float):
+class FloatWrapper(BaseValue, hint="D", wraps=float, short_name="Float"):
+    space_separable = True
+
     @staticmethod
     def from_str(
         value: str,
@@ -348,12 +475,22 @@ class FloatWrapper(BaseValue, hint="D", wraps=float):
     ):
         try:
             return float(value)
-        except ValueError as e:
-            add_error2el(ValueTypeError(f"Cannot create float", value), error_list)
+        except ValueError:
+            add_error2el(
+                ValueTypeError(
+                    f"Cannot create float",
+                    value,
+                    f"{repr(value)} is not a float",
+                    line_num,
+                ),
+                error_list,
+            )
             return value
 
 
-class StringWrapper(BaseValue, hint="S", wraps=str):
+class StringWrapper(BaseValue, hint="S", wraps=str, short_name="String"):
+    tab_separable = False
+
     @staticmethod
     def from_str(
         value: str,
@@ -365,7 +502,7 @@ class StringWrapper(BaseValue, hint="S", wraps=str):
         return value
 
 
-class RelativeDatetimeValue(BaseValue, hint="E"):
+class RelativeDatetimeValue(BaseValue, hint="E", short_name="RelativeDate"):
     def __init__(self, unit: chr, distance: int):
         self.distance = distance
         self.unit = unit.upper()
@@ -397,7 +534,7 @@ class CurrencyError(ValueTypeError):
     pass
 
 
-class CurrencyValue(BaseValue, hint="C"):
+class CurrencyValue(BaseValue, hint="C", short_name="Currency"):
     def __init__(
         self,
         value,
