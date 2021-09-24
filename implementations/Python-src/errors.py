@@ -1,8 +1,8 @@
-import itertools
+from __future__ import annotations
+
 from collections import defaultdict
 from enum import IntEnum
-from typing import Optional, List, Dict, Iterable
-from pprint import pprint
+from typing import *  # import * here so that columns and BSV can use them freely
 
 
 class ErrorSeverity(IntEnum):
