@@ -218,12 +218,9 @@ client's RAM.
 
 ### Fraction: `R`
 
-Fractions without a denominator will be assumed to be over 1.  Clients should
-store both the numerator and denominator as integers if possible and otherwise
-store them both as floats.
-
-TODO: or should the integer/float conversion be separate for the numerator &
-denominator?
+The R stands for Rational. Fractions without a denominator will be assumed to
+be over 1.  Implementations should store both the numerator and denominator as
+integers if possible.
 
 ### Date: `D`
 

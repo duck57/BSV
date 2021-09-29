@@ -279,6 +279,7 @@ def new_table_from_raw_lines(
 ) -> "Type[RowType]":
     """
 
+    :param el: optional collector for errors
     :param table_definition: RawLine with the basic table information
     :param column_heads: RawLine containing the column setup information
     :return: a new subclass of TableRow for this new table
@@ -344,17 +345,15 @@ def raw_line2dict(row_type: Type[RowType], data: RawLine, row_index: int = -1):
     :param data: the RawLine to process
     :param row_index: for creating the metadata
     :return: A dict where each column name is a (string) key.
-    Any non-string keys in this dict are either metadata o[151374]
-    or are for spillover values when there are more values than columns o[None].
+        Any non-string keys in this dict are either metadata o[151374]
+        or are for spillover values when there are more values than columns o[None].
 
-    - o[None] == None indicates that there are no spillover values in the row.
+        - o[None] == None indicates that there are no spillover values in the row.
+        - Likewise, o[column] == None indicates that the row ran out of values before reaching this column.
+        - A column with an empty value has a value of '' in the dict.
 
-    - Likewise, o[column] == None indicates that the row ran out of values before reaching this column.
-
-    - A column with an empty value has a value of '' in the dict.
-
-    Each cell is turned into a list of strings that are split according to the
-    column definition.
+        Each cell is turned into a list of strings that are split according to the
+        column definition.
     """
     meta = {"table_name": row_type.original_name, "row_index": row_index}
     o = {None: []}
