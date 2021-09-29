@@ -29,7 +29,12 @@ class ValueTests(unittest.TestCase):
 
     def test_RDV(self):
         self.assertEqual(0, RelativeDatetimeValue.from_str("Y-6.66")().days)
-        self.assertEqual(56.789, RelativeDatetimeValue.from_str("H+12:34:56.789")().seconds)
+        self.assertEqual(
+            56.789, RelativeDatetimeValue.from_str("H+12:34:56.789")().seconds
+        )
+
+    def test_RDV_from_relativedelta(self):
+        self.assertEqual("H+3", RelativeDatetimeValue(distance=relativedelta(hours=3)).__str__())
 
 
 if __name__ == "__main__":

@@ -514,7 +514,7 @@ class RelativeDatetimeValue(
     BaseValue, hint="E", short_name="RelativeDate", wraps=relativedelta
 ):
     space_separable = True
-    units = {
+    unit_expansions = {
         "H": "hours",
         "T": "days",
         "W": "weeks",
@@ -522,45 +522,124 @@ class RelativeDatetimeValue(
         "Y": "years",
         "S": "seconds",
     }
+    DAY_LENGTH = 86400
+    unit_lookups = {name: sym for sym, name in unit_expansions.items()}
+    to_seconds = {
+        "years": DAY_LENGTH * 365.24,
+        "months": DAY_LENGTH * 30.5,
+        "weeks": DAY_LENGTH * 7,
+        "days": DAY_LENGTH,
+        "hours": 3600,
+        "minutes": 60,
+        "seconds": 1,
+        "microseconds": 1 / 1_000_000,
+    }
 
     def __init__(
         self,
         unit: chr = "",
-        distance: int | str | float = 0,
+        distance: int | str | float | relativedelta = 0,
         is_abs: bool = False,
-        from_rd: Optional[relativedelta] = None,
     ):
         # preliminary sanity-checking
         unit = unit.upper().strip()
-        if not distance and not unit and not from_rd:
+        if not distance and not unit:
             raise ValueError("No information provided")
-        if from_rd and unit:
-            raise ValueError("Value defined twice")
-        if ":" in distance and unit != "H":
+        if ":" in str(distance) and unit != "H":
             raise ValueError(f"Colon in non-hour {unit}{distance}")
-        if from_rd:
-            ...  # convert distance from a relative delta
-        if unit not in self.units.keys():
+
+        if isinstance(distance, relativedelta):  # convert from a relativedelta
+            if unit:
+                raise ValueError("Value defined twice")
+
+            attrs = {}
+            # collect values
+            for interval in [
+                "years",
+                "months",
+                "days",
+                "hours",
+                "minutes",
+                "seconds",
+                "microseconds",
+            ]:
+                attrs[interval] = getattr(distance, interval, 0)
+            distance = 0  # clear distance
+
+            # how many of these have something in them?
+            set_attr_count = sum([1 if x else 0 for x in attrs.values()])
+            if set_attr_count == 1:  # a single set attribute
+                for interval, amount in attrs.items():
+                    unit = self.unit_lookups[interval]
+                    if amount:
+                        distance = int(amount) if (amount == int(amount)) else amount
+                        break
+            elif set_attr_count == 0:  # it's equal to 0
+                unit = "T"
+            else:  # combine multiple values into one
+                max_interval = ""
+                in_seconds = 0  # total up the number of seconds
+                for interval, amount in attrs.items():
+                    if amount and not max_interval:
+                        max_interval = interval
+                    in_seconds += amount * self.to_seconds[interval]
+
+                if (
+                    in_seconds < self.DAY_LENGTH
+                    or max_interval in ["hours", "minutes", "seconds", "microseconds"]
+                    and in_seconds < self.DAY_LENGTH * 23
+                ):  # convert to HH:MM:SS for short durations
+                    is_neg: bool = in_seconds < 0
+                    if is_neg:
+                        in_seconds = abs(in_seconds)
+                    unit = "H"
+                    minutes = in_seconds // 60
+                    in_seconds %= 60
+                    hours = minutes // 60
+                    minutes %= 60
+                    distance = (
+                        "-" if is_neg else "+" + f"{hours}:{minutes}:{in_seconds}"
+                    )
+                else:  # find the smallest chunk of time where the integer part > 1
+                    for interval, division in self.to_seconds.items():
+                        if interval in [
+                            "months",
+                            "weeks",
+                            "hours",
+                            "minutes",
+                            "seconds",
+                            "microseconds",
+                        ]:
+                            continue  # skip these
+                        distance = round(in_seconds / self.to_seconds[interval], 2)
+                        unit = self.unit_lookups[interval]
+                        if distance >= 1:
+                            break
+
+        if unit not in self.unit_expansions.keys():
             raise NotImplementedError(
                 f"The computer does not understand {unit}."
-                + f"  It is not in {''.join(self.units.keys())}."
+                + f"  It is not in {''.join(self.unit_expansions.keys())}."
             )
 
-        try:
-            self.distance = int(distance)
-        except ValueError:
-            pass
-        try:
-            self.distance = float(distance)
-        except ValueError:
-            if ":" in distance and unit == "H":
-                """
-                If you try to store a value of 'H-4:2x:d3' and the program
-                later blows up at you, that's your personal problem
-                """
-                self.distance = distance
-            else:
-                raise ValueError(f"Cannot convert '{distance}' to a numeric type")
+        if isinstance(distance, str):
+            try:
+                self.distance = int(distance)
+            except ValueError:
+                pass
+            try:
+                self.distance = float(distance)
+            except ValueError:
+                if ":" in distance and unit == "H":
+                    """
+                    If you try to store a value of 'H-4:2x:d3' and the program
+                    later blows up at you, that's your personal problem
+                    """
+                    self.distance = distance
+                else:
+                    raise ValueError(f"Cannot convert '{distance}' to a numeric type")
+        else:
+            self.distance = distance
 
         self.d_type = type(self.distance)
         self.unit = unit
@@ -617,7 +696,7 @@ class RelativeDatetimeValue(
                 return relativedelta(hours=hours, minutes=minutes, seconds=seconds)
 
             if self.d_type == int or self.unit in "DWHS":  # the easy cases
-                return relativedelta(**{self.units[self.unit]: self.distance})
+                return relativedelta(**{self.unit_expansions[self.unit]: self.distance})
 
             # we're left with float distances now
             # these are handled slightly differently before being handed to
