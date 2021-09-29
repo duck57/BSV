@@ -510,7 +510,7 @@ class StringWrapper(BaseValue, hint="S", wraps=str, short_name="String"):
         return value
 
 
-class RelativeDatetimeValue(
+class RelativeDatetimeString(
     BaseValue, hint="E", short_name="RelativeDate", wraps=relativedelta
 ):
     space_separable = True
@@ -593,13 +593,22 @@ class RelativeDatetimeValue(
                     if is_neg:
                         in_seconds = abs(in_seconds)
                     unit = "H"
-                    minutes = in_seconds // 60
+                    minutes = int(in_seconds // 60)
                     in_seconds %= 60
                     hours = minutes // 60
                     minutes %= 60
-                    distance = (
-                        "-" if is_neg else "+" + f"{hours}:{minutes}:{in_seconds}"
+                    milliseconds, in_seconds = modf(in_seconds)
+                    in_seconds = int(in_seconds)
+                    milliseconds = (
+                        str(round(milliseconds, 6))[2:] if milliseconds else None
                     )
+                    distance = ("-" if is_neg else "+") + f"{hours}:{minutes:02}"
+                    if (
+                        in_seconds or milliseconds
+                    ):  # leave off :SS.sss if they're both 0
+                        distance += f":{in_seconds:02}"
+                    if milliseconds:
+                        distance += f".{milliseconds}"
                 else:  # find the smallest chunk of time where the integer part > 1
                     for interval, division in self.to_seconds.items():
                         if interval in [
@@ -637,7 +646,10 @@ class RelativeDatetimeValue(
                     """
                     self.distance = distance
                 else:
-                    raise ValueError(f"Cannot convert '{distance}' to a numeric type")
+                    raise ValueError(
+                        f"Cannot convert '{distance}' to a numeric type."
+                        + f"\nUnit is {unit}."
+                    )
         else:
             self.distance = distance
 
@@ -660,9 +672,47 @@ class RelativeDatetimeValue(
         **extras,
     ):
         try:
-            return RelativeDatetimeValue(value[0], value[1:])
+            return RelativeDatetimeString(value[0], value[1:])
         except ValueError:
             add_error2el(InputError("Blah", value, "Cannot ", line_num), error_list)
+
+    def as_relativedelta(self) -> relativedelta:
+        """Convert self to a relativedelta"""
+
+        if self.d_type == str:  # hour stored as HH:MM[:SS.sss]
+            hours, minutes, *seconds = self.distance.split(":")
+            hours, minutes = int(hours), int(minutes)
+            if seconds:
+                seconds = seconds[0]
+                try:
+                    seconds = int(seconds)
+                except ValueError:
+                    seconds = float(seconds)
+            else:
+                seconds = 0
+            if hours < 0:
+                minutes, seconds = -minutes, -seconds
+            return relativedelta(hours=hours, minutes=minutes, seconds=seconds)
+
+        if self.d_type == int or self.unit in "DWHS":  # the easy cases
+            return relativedelta(**{self.unit_expansions[self.unit]: self.distance})
+
+        # we're left with float distances now
+        # these are handled slightly differently before being handed to
+        # datetime.relativedelta
+        if self.unit == "Y":  # fractional years
+            year_part, years = modf(self.distance)
+            years = int(years)
+            if 0.2 < abs(year_part) < 0.8:
+                return relativedelta(years=years, months=round(12 * year_part))
+            # use days when it's close to a full year
+            return relativedelta(years=years, days=round(365.24 * year_part))
+        if self.unit == "M":  # fractional months
+            return relativedelta(days=round(30.5 * self.distance))
+
+        raise NotImplementedError(
+            f"It is unclear how you got here {str(self)} {self.d_type}"
+        )
 
     def __call__(self, dt=None):
         """Call an instance of RDV, functionality depends on the type of dt
@@ -676,51 +726,17 @@ class RelativeDatetimeValue(
         if self.unit == "X" or not self.unit:
             # like a regular number
             return self.distance + (dt if dt else 0)
-
         if dt is None:
-            """Convert self to a relativedelta"""
-
-            if self.d_type == str:  # hour stored as HH:MM[:SS.sss]
-                hours, minutes, *seconds = self.distance.split(":")
-                hours, minutes = int(hours), int(minutes)
-                if seconds:
-                    seconds = seconds[0]
-                    try:
-                        seconds = int(seconds)
-                    except ValueError:
-                        seconds = float(seconds)
-                else:
-                    seconds = 0
-                if hours < 0:
-                    minutes, seconds = -minutes, -seconds
-                return relativedelta(hours=hours, minutes=minutes, seconds=seconds)
-
-            if self.d_type == int or self.unit in "DWHS":  # the easy cases
-                return relativedelta(**{self.unit_expansions[self.unit]: self.distance})
-
-            # we're left with float distances now
-            # these are handled slightly differently before being handed to
-            # datetime.relativedelta
-            if self.unit == "Y":  # fractional years
-                year_part, years = modf(self.distance)
-                years = int(years)
-                if 0.2 < abs(year_part) < 0.8:
-                    return relativedelta(years=years, months=round(12 * year_part))
-                # use days when it's close to a full year
-                return relativedelta(years=years, days=round(365.24 * year_part))
-            if self.unit == "M":  # fractional months
-                return relativedelta(days=round(30.5 * self.distance))
-
-            raise NotImplementedError(
-                f"It is unclear how you got here {str(self)} {self.d_type}"
-            )
-
-        if isinstance(dt, RelativeDatetimeValue):
+            return self.as_relativedelta()
+        if isinstance(dt, RelativeDatetimeString):
             return self() + dt()
         if isinstance(dt, datetime.datetime) or isinstance(dt, datetime.date):
             return dt + self()
         if isinstance(dt, relativedelta) or isinstance(dt, datetime.timedelta):
             return dt + self()
+
+    def __add__(self, other):
+        return self(other)
 
 
 class CurrencyError(ValueTypeError):

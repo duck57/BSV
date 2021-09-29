@@ -27,14 +27,28 @@ class ValueTests(unittest.TestCase):
         fraction_column(bad_fractions, error_collector)
         self.assertEqual(2, len(error_collector))
 
-    def test_RDV(self):
-        self.assertEqual(0, RelativeDatetimeValue.from_str("Y-6.66")().days)
+    def test_RDS(self):
+        self.assertEqual(0, RelativeDatetimeString.from_str("Y-6.66")().days)
         self.assertEqual(
-            56.789, RelativeDatetimeValue.from_str("H+12:34:56.789")().seconds
+            56.789, RelativeDatetimeString.from_str("H+12:34:56.789")().seconds
         )
 
-    def test_RDV_from_relativedelta(self):
-        self.assertEqual("H+3", RelativeDatetimeValue(distance=relativedelta(hours=3)).__str__())
+    def test_RDS_from_relativedelta(self):
+        self.assertEqual(
+            "H+3", RelativeDatetimeString(distance=relativedelta(hours=3)).__str__()
+        )
+        self.assertEqual(
+            "H-6:45",
+            RelativeDatetimeString(
+                distance=relativedelta(hours=-6, minutes=-45)
+            ).__str__(),
+        )
+        self.assertEqual(
+            "H+6:06:06.666",
+            RelativeDatetimeString(
+                distance=relativedelta(hours=6, minutes=6, seconds=6.666)  # noqa
+            ).__str__(),
+        )
 
 
 if __name__ == "__main__":
