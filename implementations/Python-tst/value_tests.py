@@ -50,6 +50,10 @@ class ValueTests(unittest.TestCase):
             ).__str__(),
         )
 
+    def test_RDS_abs_neg(self):
+        self.assertEqual("T+6", (-RelativeDatetimeString("T", -6)).__str__())
+        self.assertEqual("Y+3", abs(RelativeDatetimeString("Y", -3)).__str__())
+
 
 if __name__ == "__main__":
     unittest.main()

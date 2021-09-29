@@ -679,7 +679,7 @@ class RelativeDatetimeString(
     def as_relativedelta(self) -> relativedelta:
         """Convert self to a relativedelta"""
 
-        if self.d_type == str:  # hour stored as HH:MM[:SS.sss]
+        if isinstance(self.distance, str):  # hour stored as HH:MM[:SS.sss]
             hours, minutes, *seconds = self.distance.split(":")
             hours, minutes = int(hours), int(minutes)
             if seconds:
@@ -714,8 +714,8 @@ class RelativeDatetimeString(
             f"It is unclear how you got here {str(self)} {self.d_type}"
         )
 
-    def __call__(self, dt=None):
-        """Call an instance of RDV, functionality depends on the type of dt
+    def __call__(self, dt=None, as_rds: bool = False):
+        """Call an instance of RDS, functionality depends on the type of dt
 
         - instance unit is missing or 'X': treat self.distance as a pure number
         - dt is None: return a relativedelta object equivalent to self
@@ -723,20 +723,49 @@ class RelativeDatetimeString(
             self() [the relative delta] with dt
         """
 
-        if self.unit == "X" or not self.unit:
+        if (
+            self.unit == "X"
+            or not self.unit
+            or isinstance(dt, float)
+            or isinstance(dt, int)
+        ) and not isinstance(self.distance, str):
             # like a regular number
             return self.distance + (dt if dt else 0)
         if dt is None:
             return self.as_relativedelta()
         if isinstance(dt, RelativeDatetimeString):
-            return self() + dt()
-        if isinstance(dt, datetime.datetime) or isinstance(dt, datetime.date):
-            return dt + self()
-        if isinstance(dt, relativedelta) or isinstance(dt, datetime.timedelta):
-            return dt + self()
+            o = self() + dt()
+        elif isinstance(dt, datetime.datetime) or isinstance(dt, datetime.date):
+            o = dt + self()
+        elif isinstance(dt, relativedelta) or isinstance(dt, datetime.timedelta):
+            o = dt + self()
+        else:
+            raise NotImplementedError(f"Cannot add {dt} with {self}.")
+        if as_rds:
+            return RelativeDatetimeString(distance=o)
+        return o
 
     def __add__(self, other):
         return self(other)
+
+    def __sub__(self, other):
+        return -self(other)
+
+    def __neg__(self):
+        return RelativeDatetimeString(self.unit, self._negate_distance())
+
+    def __abs__(self):
+        return RelativeDatetimeString(
+            self.unit, self._negate_distance(True), is_abs=True
+        )
+
+    def _negate_distance(self, do_abs: bool = False) -> int | float | str:
+        if isinstance(self.distance, float) or isinstance(self.distance, int):
+            return abs(self.distance) if do_abs else -self.distance
+        # type(self.distance) == str from here on
+        if do_abs:
+            return "+" + self.distance[1:]
+        return ("-" if self.distance[0] == "+" else "+") + self.distance[1:]  # noqa
 
 
 class CurrencyError(ValueTypeError):
