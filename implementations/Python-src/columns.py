@@ -5,8 +5,13 @@ import dataclasses
 import decimal
 import re
 import sys
-from datetime import datetime
+import datetime
+from math import modf
+
+from dateutil.relativedelta import relativedelta
+from dateutil.parser import parse as parse_date, ParserError
 from decimal import Decimal
+from fractions import Fraction
 
 from errors import *
 
@@ -214,12 +219,15 @@ class ColumnDefinition:
         return self.sep.join(str(v) for v in vals)
 
     def is_valid(self, vals: List) -> bool:
-        return (
-            all(
-                isinstance(v, self.type.wraps) for v in vals  # noqa
-            )  # type.wraps is set in __init_subclass__ during type creation
-            and self.min <= len(vals) <= self.max
-        )
+        return self.validate_length(vals) and self.validate_length(vals)
+
+    def validate_typing(self, vals: Iterable):
+        return all(
+            isinstance(v, self.type.wraps) for v in vals  # noqa
+        )  # type.wraps is set in __init_subclass__ during type creation
+
+    def validate_length(self, vals: Sized) -> bool:
+        return self.min <= len(vals) <= self.max
 
 
 class ColumnTemplate(ColumnDefinition):
@@ -243,7 +251,7 @@ class ColumnTemplate(ColumnDefinition):
         """
         :param column_name: the name of the new ColumnDefinition to return
         :param currency_string: the "2 USD" precision and currency code specification
-        to be used in currency columns
+            to be used in currency columns
         :param el: optional ErrorList for catching errors during column creation
         :param kwargs: junk to maintain class hierarchy compatibility
         :return: A ColumnDefinition based on self
@@ -299,14 +307,14 @@ class ColumnTemplate(ColumnDefinition):
         """Creation function for generic ColumnTemplates (used during module import)
 
         :param name_stem: The opening part of the class names for concrete
-        generic column templates, typically a quantity, like `Several` or
-        `ExactlyTwo`
+            generic column templates, typically a quantity, like `Several` or
+            `ExactlyTwo`
         :param min_: minimum number of values in the column, typically 0 or 1
         :param max_: maximum number of values in the column, typically 1 or None
         :param _type_: setting a type will return a concrete generic ColumnTemplate
-        instance of this type.  Leaving it None will return the function.
+            instance of this type.  Leaving it None will return the function.
         :return: Either a concrete instance of a generic ColumnTemplate or
-        a function which will create generic ColumnTemplates
+            a function which will create generic ColumnTemplates
         """
 
         def create_generic_template(type_, n: str,) -> ColumnTemplate:
@@ -315,7 +323,7 @@ class ColumnTemplate(ColumnDefinition):
             :param type_: The type of column to create
             :param n: Same as name_stem in the outer function
             :return: A generic ColumnTemplate with min and max set by the
-            outer function.
+                outer function.
             """
             args = {"data_type": type_}
             if min_ is not None:
@@ -502,14 +510,66 @@ class StringWrapper(BaseValue, hint="S", wraps=str, short_name="String"):
         return value
 
 
-class RelativeDatetimeValue(BaseValue, hint="E", short_name="RelativeDate"):
-    def __init__(self, unit: chr, distance: int):
-        self.distance = distance
-        self.unit = unit.upper()
-        super().__init__(str(self))
+class RelativeDatetimeValue(
+    BaseValue, hint="E", short_name="RelativeDate", wraps=relativedelta
+):
+    space_separable = True
+    units = {
+        "H": "hours",
+        "T": "days",
+        "W": "weeks",
+        "M": "months",
+        "Y": "years",
+        "S": "seconds",
+    }
 
-    @property
-    def value(self):
+    def __init__(
+        self,
+        unit: chr = "",
+        distance: int | str | float = 0,
+        is_abs: bool = False,
+        from_rd: Optional[relativedelta] = None,
+    ):
+        # preliminary sanity-checking
+        unit = unit.upper().strip()
+        if not distance and not unit and not from_rd:
+            raise ValueError("No information provided")
+        if from_rd and unit:
+            raise ValueError("Value defined twice")
+        if ":" in distance and unit != "H":
+            raise ValueError(f"Colon in non-hour {unit}{distance}")
+        if from_rd:
+            ...  # convert distance from a relative delta
+        if unit not in self.units.keys():
+            raise NotImplementedError(
+                f"The computer does not understand {unit}."
+                + f"  It is not in {''.join(self.units.keys())}."
+            )
+
+        try:
+            self.distance = int(distance)
+        except ValueError:
+            pass
+        try:
+            self.distance = float(distance)
+        except ValueError:
+            if ":" in distance and unit == "H":
+                """
+                If you try to store a value of 'H-4:2x:d3' and the program
+                later blows up at you, that's your personal problem
+                """
+                self.distance = distance
+            else:
+                raise ValueError(f"Cannot convert '{distance}' to a numeric type")
+
+        self.d_type = type(self.distance)
+        self.unit = unit
+        self.is_absolute = is_abs
+
+    def __str__(self):
+        if self.d_type == str:
+            # fancy hour types
+            return f"{self.unit}{self.distance}"
         return f"{self.unit}{'' if self.distance < 0 else '+'}{self.distance}"
 
     @staticmethod
@@ -520,14 +580,68 @@ class RelativeDatetimeValue(BaseValue, hint="E", short_name="RelativeDate"):
         *others,
         **extras,
     ):
-        ...
+        try:
+            return RelativeDatetimeValue(value[0], value[1:])
+        except ValueError:
+            add_error2el(InputError("Blah", value, "Cannot ", line_num), error_list)
 
-    def __call__(self, dt: datetime | int):
-        if isinstance(dt, int):
-            return dt + self.distance
+    def __call__(self, dt=None):
+        """Call an instance of RDV, functionality depends on the type of dt
 
-    def __str__(self):
-        ...
+        - instance unit is missing or 'X': treat self.distance as a pure number
+        - dt is None: return a relativedelta object equivalent to self
+        - dt is most other types of datetime objects: try your best to add
+            self() [the relative delta] with dt
+        """
+
+        if self.unit == "X" or not self.unit:
+            # like a regular number
+            return self.distance + (dt if dt else 0)
+
+        if dt is None:
+            """Convert self to a relativedelta"""
+
+            if self.d_type == str:  # hour stored as HH:MM[:SS.sss]
+                hours, minutes, *seconds = self.distance.split(":")
+                hours, minutes = int(hours), int(minutes)
+                if seconds:
+                    seconds = seconds[0]
+                    try:
+                        seconds = int(seconds)
+                    except ValueError:
+                        seconds = float(seconds)
+                else:
+                    seconds = 0
+                if hours < 0:
+                    minutes, seconds = -minutes, -seconds
+                return relativedelta(hours=hours, minutes=minutes, seconds=seconds)
+
+            if self.d_type == int or self.unit in "DWHS":  # the easy cases
+                return relativedelta(**{self.units[self.unit]: self.distance})
+
+            # we're left with float distances now
+            # these are handled slightly differently before being handed to
+            # datetime.relativedelta
+            if self.unit == "Y":  # fractional years
+                year_part, years = modf(self.distance)
+                years = int(years)
+                if 0.2 < abs(year_part) < 0.8:
+                    return relativedelta(years=years, months=round(12 * year_part))
+                # use days when it's close to a full year
+                return relativedelta(years=years, days=round(365.24 * year_part))
+            if self.unit == "M":  # fractional months
+                return relativedelta(days=round(30.5 * self.distance))
+
+            raise NotImplementedError(
+                f"It is unclear how you got here {str(self)} {self.d_type}"
+            )
+
+        if isinstance(dt, RelativeDatetimeValue):
+            return self() + dt()
+        if isinstance(dt, datetime.datetime) or isinstance(dt, datetime.date):
+            return dt + self()
+        if isinstance(dt, relativedelta) or isinstance(dt, datetime.timedelta):
+            return dt + self()
 
 
 class CurrencyError(ValueTypeError):
@@ -650,6 +764,35 @@ class CurrencyValue(BaseValue, hint="C", short_name="Currency"):
             decimal_places=self.currency_precision,
             el=el,
         )
+
+
+class FractionWrapper(BaseValue, hint="R", wraps=Fraction, short_name="Fraction"):
+    """Fractions are composed of two integers separated by /"""
+
+    @staticmethod
+    def from_str(
+        value: str,
+        error_list: Optional[ErrorList] = None,
+        line_num: int = -1,
+        *others,
+        **extras,
+    ):
+        try:
+            # handle the parsing from string via int() and Fraction()
+            # Do not directly return Fraction(value) in case of spaces
+            # surrounding the slash
+            return Fraction(*[int(v) for v in value.split("/")])
+        except ValueError:
+            add_error2el(
+                InputError(
+                    "Invalid fraction!",
+                    value,
+                    "The input value cannot be parsed into a numerator and denominator",
+                    line_num,
+                ),
+                error_list,
+            )
+            return "/".join(value)
 
 
 ColumnType = TypeVar("ColumnType", bound=ColumnDefinition)
