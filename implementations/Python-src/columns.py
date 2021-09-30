@@ -406,7 +406,7 @@ class BaseValue(abc.ABC):
     # make wraps, short_name, and hint class attributes that are parsed
     # by the __new__ of the metaclass as an alternate strategy
     def __init_subclass__(
-        cls, hint: chr = "", wraps: Type = None, short_name: str = None, **kwargs,
+        cls, hint: chr = "", wraps: List[Type] = None, short_name: str = None, **kwargs,
     ):
         """
         Adds the new class to register its type handling.
@@ -424,18 +424,18 @@ class BaseValue(abc.ABC):
         else:
             raise KeyError(f"{cls.__name__} is missing a data hint")
 
-        if wraps:
-            ColumnDefinition.DataHints[wraps] = cls
-            cls.wraps = wraps
-        else:
-            cls.wraps = cls
+        if wraps is None:
+            wraps = []
+        wraps.append(cls)
+        for w in wraps:
+            ColumnDefinition.DataHints[w] = cls
 
         if short_name:
             cls.short_name = short_name
             ColumnTemplate.create_templates4type(cls)
 
 
-class IntWrapper(BaseValue, hint="I", wraps=int, short_name="Int"):
+class IntWrapper(BaseValue, hint="I", wraps=[int], short_name="Int"):
     space_separable = True
 
     @staticmethod
@@ -470,7 +470,7 @@ class IntWrapper(BaseValue, hint="I", wraps=int, short_name="Int"):
             return value
 
 
-class FloatWrapper(BaseValue, hint="D", wraps=float, short_name="Float"):
+class FloatWrapper(BaseValue, hint="D", wraps=[float], short_name="Float"):
     space_separable = True
 
     @staticmethod
@@ -496,7 +496,7 @@ class FloatWrapper(BaseValue, hint="D", wraps=float, short_name="Float"):
             return value
 
 
-class StringWrapper(BaseValue, hint="S", wraps=str, short_name="String"):
+class StringWrapper(BaseValue, hint="S", wraps=[str], short_name="String"):
     tab_separable = False
 
     @staticmethod
@@ -511,7 +511,7 @@ class StringWrapper(BaseValue, hint="S", wraps=str, short_name="String"):
 
 
 class RelativeDatetimeString(
-    BaseValue, hint="E", short_name="RelativeDate", wraps=relativedelta
+    BaseValue, hint="E", short_name="RelativeDate", wraps=[relativedelta]
 ):
     space_separable = True
     unit_expansions = {
@@ -890,7 +890,7 @@ class CurrencyValue(BaseValue, hint="C", short_name="Currency"):
         )
 
 
-class FractionWrapper(BaseValue, hint="R", wraps=Fraction, short_name="Fraction"):
+class FractionWrapper(BaseValue, hint="R", wraps=[Fraction], short_name="Fraction"):
     """Fractions are composed of two integers separated by /"""
 
     @staticmethod
@@ -911,12 +911,62 @@ class FractionWrapper(BaseValue, hint="R", wraps=Fraction, short_name="Fraction"
                 InputError(
                     "Invalid fraction!",
                     value,
-                    "The input value cannot be parsed into a numerator and denominator",
+                    f"{value} cannot be parsed into a numerator and denominator",
                     line_num,
                 ),
                 error_list,
             )
             return "/".join(value)
+
+
+class DateWrapper(
+    BaseValue, hint="D", wraps=[datetime.datetime, datetime.date], short_name="DateT"
+):
+    @staticmethod
+    def from_str(
+        value: str,
+        error_list: Optional[ErrorList] = None,
+        line_num: int = -1,
+        *others,
+        **extras,
+    ):
+        try:
+            parsed_value = parse_date(value)
+        except ValueError:
+            add_error2el(
+                ValueTypeError(
+                    "Invalid date(time)",
+                    value,
+                    f"{value} cannot be parsed into a date.",
+                    line_num,
+                ),
+                error_list,
+            )
+            return value
+        if "T" in value or " " in value:
+            return parsed_value
+        return parsed_value.date()
+
+
+class TimeWrapper(BaseValue, hint="T", wraps=[datetime.time], short_name="Time"):
+    @staticmethod
+    def from_str(
+        value: str,
+        error_list: Optional[ErrorList] = None,
+        line_num: int = -1,
+        *others,
+        **extras,
+    ):
+        try:
+            return parse_date(value).time()
+        except ValueError:
+            add_error2el(
+                ValueTypeError(
+                    "Cannot parse time", value, f"{value} is not a valid time", line_num
+                ),
+                error_list,
+            )
+            return value
 
 
 ColumnType = TypeVar("ColumnType", bound=ColumnDefinition)
