@@ -64,7 +64,7 @@ class ColumnDefinition:
     strings.
     """
 
-    is_template: bool = True
+    is_template: bool = False
     DataHints: "Dict[Union[chr, Type], Type[BaseValue]]" = {}
 
     def __init__(
@@ -82,12 +82,13 @@ class ColumnDefinition:
         self.type = None
 
         if isinstance(data_type, str):
-            # add an S to default to string type for a default
             (
                 data_type,
                 decimal_places,
                 currency_code,
-            ) = CurrencyValue.unwrap_currency_from_string(data_type + "S", el)
+            ) = CurrencyValue.unwrap_currency_from_string(
+                data_type + "S", el,  # add an S to default to string type for a default
+            )
             data_type = data_type[0]  # remove the S
         else:  # make the linter happy
             currency_code, decimal_places = None, None
@@ -98,9 +99,11 @@ class ColumnDefinition:
             self.type = CurrencyValue.lookup_currency_type(
                 currency_code[:-1], decimal_places  # remove the S
             )
-        elif isinstance(data_type, type) and issubclass(data_type, CurrencyValue):
-            self.type = data_type
-        elif isinstance(data_type, CurrencyValue):
+        elif hasattr(data_type, "code") and hasattr(data_type, "precision"):
+            """
+            hasattr() is used instead of isinstance() + issubclass() so that
+            only one elif is needed instead of at least two
+            """
             self.type = CurrencyValue.lookup_currency_type(
                 data_type.code, data_type.precision
             )
@@ -289,28 +292,51 @@ class ColumnTemplate(ColumnDefinition):
             el=el,
         )
 
-    @staticmethod
-    def _add_generic_template_to_globals(
+    @classmethod
+    def _register_generic_template(
+        cls,
         quantity_prefix: str,
         meta_template: Callable[[Any], ColumnTemplate],
         type_name: str,
         column_type,
-    ):
+    ) -> None:
         """Injects generic templates into the global namespace for client modules to use
 
-        > ColumnTemplate._add_generic_template_to_globals("Single", ColumnTemplate.OnlyOne, "Int", int)
+        >>> ColumnTemplate._register_generic_template("Single", ColumnTemplate.generic_ranges["OnlyOne"], "Int", int)
 
-        Clients may now use SingleInt() as a template to create their specific columns
+        Clients may now use ColumnTemplate.SingleInt() as a template to create their specific columns
         """
-        template = meta_template(column_type)
-        globals()[quantity_prefix + type_name] = template
+        setattr(cls, quantity_prefix + type_name, meta_template(column_type))
 
     @classmethod
-    def register_meta_template(cls, name: str, template_creation_function: Callable):
-        """Register a meta template and then inject concrete generic templates into globals()"""
+    def register_meta_template(
+        cls, name: str, template_creation_function: Callable
+    ) -> None:
+        """
+        Register a meta template and then inject concrete generic templates into ColumnDefinition
+
+        If name = "Name" and the types names "Int", "Str", and "Args" are registered, the
+        following class attributes will be created:
+
+        * ColumnDefinition.Name = t_c_f
+        * ColumnDefinition.NameInt
+        * ColumnDefinition.NameStr
+        * ColumnDefinition.NameArgs
+        """
+        # check for name conflicts
+        if any(d.startswith(name) for d in dir(ColumnTemplate)):
+            raise NameError(f"{name} conflicts with a previously-defined name")
+
+        # register the meta template
+        #
+        # first in the generic range dict, for use when creating concrete generic templates
         cls.generic_ranges[name] = template_creation_function
+        # also as a class attribute
+        setattr(cls, name, template_creation_function)
+
+        # create matching generic columns for previously-registered column data types
         for type_name, type_ in cls.template_ready_types.items():
-            cls._add_generic_template_to_globals(
+            cls._register_generic_template(
                 name, template_creation_function, type_name, type_
             )
 
@@ -362,6 +388,10 @@ class ColumnTemplate(ColumnDefinition):
 
         return _new_template
 
+    """
+    Begin template creators
+    """
+
     @classmethod
     def at_least(cls, min_: int, type_=None):
         return cls._meta_template("at least", min_, None, type_)
@@ -376,19 +406,24 @@ class ColumnTemplate(ColumnDefinition):
 
     @classmethod
     def exactly(cls, number: int, type_=None):
+        """Expected use case is exactly(1)"""
         return cls._meta_template("exactly", number, number, type_)
 
     @classmethod
     def unlimited(cls, type_=None):
+        """Used when registering meta templates for consistency"""
         return cls._meta_template("unlimited", None, None, type_)
+
+    """
+    End template creators
+    """
 
     @classmethod
     def create_templates4type(cls, col_type: Type[BaseValue]):
+        """Creates generic templates for the newly-registered type"""
         cls.template_ready_types[col_type.short_name] = col_type
         for r_name, r_fun in cls.generic_ranges.items():
-            cls._add_generic_template_to_globals(
-                r_name, r_fun, col_type.short_name, col_type
-            )
+            cls._register_generic_template(r_name, r_fun, col_type.short_name, col_type)
 
 
 # Not defined in the ColumnTemplate class due to initialization issues during import
@@ -684,8 +719,9 @@ class RelativeDatetimeString(
             return f"{self.unit}{self.distance}"
         return f"{self.unit}{'' if self.distance < 0 else '+'}{self.distance}"
 
-    @staticmethod
+    @classmethod
     def from_str(
+        cls,
         value: str,
         error_list: Optional[ErrorList] = None,
         line_num: int = -1,
@@ -693,7 +729,7 @@ class RelativeDatetimeString(
         **extras,
     ):
         try:
-            return RelativeDatetimeString(value[0], value[1:])
+            return cls(value[0], value[1:])
         except ValueError:
             add_error2el(InputError("Blah", value, "Cannot ", line_num), error_list)
 
@@ -720,7 +756,7 @@ class RelativeDatetimeString(
 
         # we're left with float distances now
         # these are handled slightly differently before being handed to
-        # datetime.relativedelta
+        # relativedelta
         if self.unit == "Y":  # fractional years
             year_part, years = modf(self.distance)
             years = int(years)
@@ -830,17 +866,21 @@ class CurrencyValue(BaseValue, abc.ABC, hint="C", short_name="Currency"):
             and self.code != called_by.type.code
         )
 
-    @staticmethod
+    @classmethod
     def lookup_currency_type(
-        currency: str, precision: Optional[int] = None
+        cls, currency: str, precision: Optional[int] = None
     ) -> Type[CurrencyType]:
+        """Returns an existing currency type if a matching one is found and
+        otherwise returns and registers a new type"""
         currency = currency.upper().strip()
         try:
-            return CurrencyValue.currency_code_collection[currency]
+            return cls.currency_code_collection[currency]
         except KeyError:
             return type(  # noqa  Otherwise the type checker complains
                 f"currency_{currency}",
-                (CurrencyValue,),
+                (
+                    CurrencyValue,
+                ),  # not (cls, ) so currencies don't subclass one another
                 {"precision": precision, "code": currency},
             )
 
@@ -850,6 +890,7 @@ class CurrencyValue(BaseValue, abc.ABC, hint="C", short_name="Currency"):
 
     @property
     def dh_chr(self) -> str:
+        """Used when creating the column header for BSV output"""
         return f"C {self.currency_definition_string()}"
 
     def __init_subclass__(cls, **kwargs):
@@ -919,16 +960,7 @@ class CurrencyValue(BaseValue, abc.ABC, hint="C", short_name="Currency"):
         min_vals: int = -1,
         el: Optional[ErrorList] = None,
     ) -> ColumnDefinition:
-        return ColumnDefinition(
-            name,
-            CurrencyValue,
-            max_vals,
-            sep,
-            min_vals,
-            currency_code=cls.code,
-            decimal_places=cls.precision,
-            el=el,
-        )
+        return ColumnDefinition(name, cls, max_vals, sep, min_vals, el=el,)
 
     @staticmethod
     def unwrap_currency_from_string(
