@@ -27,9 +27,7 @@ class RawLine(NamedTuple):
     Ending meanings:
 
     - GROUP SEPARATOR = end of line/record/row
-
     - FILE SEPARATOR = end of table, client should read next table
-
     - '' = end of physical file
 
     other values may cause undefined behavior
@@ -39,13 +37,6 @@ class RawLine(NamedTuple):
     ending: chr
     row_index: int = -1
     starts_after: int = -1
-
-    def extract_table_name(self) -> str:
-        """For use when reading a table header
-
-        :return: A normalized edition of the table name string
-        """
-        return to_class_name(self.content[0])
 
 
 def _split_file_into_rows(
@@ -117,102 +108,93 @@ class TableRow(abc.ABC):
     These methods should be defined when creating the ns dict in new_table_type()
     """
 
-    @abc.abstractmethod
+    columns = {}
+    allow_short = True
+    allow_extras = True
+
     def __post_init__(self, *fields):
-        ...
-
-    @abc.abstractmethod
-    def values(self):
-        ...
-
-
-def _post_init4bsv_row(self, *fields):
-    self.errors = ErrorList()
-    *fields, raw_extras, self.row_index = fields
-    self.extras = [x.split(UNIT) for x in raw_extras if x is not None]
-    for col_num, (value, (c_name, c_type)) in enumerate(
-        zip(fields, self.columns.items())
-    ):
-        if value is None and not self.allow_short and not self.errors:
+        self.errors = ErrorList()
+        *fields, raw_extras, self.row_index = fields
+        self.extras = [x.split(UNIT) for x in raw_extras if x is not None]
+        for col_num, (value, (c_name, c_type)) in enumerate(
+            zip(fields, self.columns.items())
+        ):
+            if value is None and not self.allow_short and not self.errors:
+                self.errors.append(
+                    RowTooShortError(
+                        "Line too short",
+                        fields,
+                        f"Only {col_num} column(s).",
+                        self.row_index,
+                        severity=ErrorSeverity.ROW_MALFORMATION,
+                    )
+                )
+            self.__setattr__(c_name, c_type(value, self.errors, self.row_index))
+        if self.extras and not self.allow_extras:
             self.errors.append(
-                RowTooShortError(
-                    "Line too short",
+                RowTooLongError(
+                    "Too many fields!",
                     fields,
-                    f"Only {col_num} column(s).",
+                    f"{len(self.extras)} extra fields were provided for a table with {len(self.columns)}.",
                     self.row_index,
                     severity=ErrorSeverity.ROW_MALFORMATION,
                 )
             )
-        self.__setattr__(c_name, c_type(value, self.errors, self.row_index))
-    if self.extras and not self.allow_extras:
-        self.errors.append(
-            RowTooLongError(
-                "Too many fields!",
-                fields,
-                f"{len(self.extras)} extra fields were provided for a table with {len(self.columns)}.",
-                self.row_index,
-                severity=ErrorSeverity.ROW_MALFORMATION,
+
+    @classmethod
+    def table_str(cls, use_n: bool = True) -> str:
+        """The opposite of new_table_from_raw_lines
+
+        :return: a string that will generate the RowType
+        """
+        # pprint([c.definition_string for c in cls.columns.values()])  # debugging
+        return (
+            _make_header_str(
+                [
+                    getattr(cls, "original_name", cls.__name__),  # name
+                    ("X" if cls.allow_extras else "")
+                    + ("S" if cls.allow_short else ""),  # options
+                    getattr(cls, "comment", None),  # comment
+                    getattr(cls, "client", None),  # client
+                ]
+                + getattr(cls, "extra_headers", []),
+                RECORD,
             )
+            + GROUP
+            + ("\n" if use_n else "")
+            + RECORD.join([c.definition_string for c in cls.columns.values()])
         )
 
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.column_names = [c for c in cls.columns.keys()]
+        cls.num_columns = len(cls.columns)
 
-def _values4bsv_row(self):
-    return [getattr(self, x) for x in self.__dataclass_fields__]
+    def data_dict(self) -> Dict[str, List]:
+        d = {k: getattr(self, k) for k in self.column_names}
+        d["extras"] = self.extras
+        return d
 
-
-def _column_repr__(self):
-    return f"{self.__name__}_row({self.__dict__})"
-
-
-def _column_names(cls) -> List[str]:
-    return [c.name for c in cls.columns.values()]
-
-
-def _2bsv_str(self, fill: bool = True, trim: bool = True) -> str:
-    o: List[str] = []
-    for c_name, c_def in self.columns.items():
-        v = getattr(self, c_name, None)
-        if v is None:
-            if not fill:
-                continue
-            v = ""
-        o.append(c_def.to_str(v))
-    if not trim and self.extras:
-        o.append(RECORD.join(UNIT.join(s for s in z) for z in self.extras))
-    return RECORD.join(o)
-
-
-def _literal_str(self) -> str:
-    """__str__ but does not care about table length definitions"""
-    return _2bsv_str(self, False, False)
+    def as_bsv_str(
+        self, fill: bool = True, trim_columns: bool = True, trim_values: bool = False
+    ) -> str:
+        o: List[str] = []
+        for c_name, c_def in self.columns.items():
+            v = getattr(self, c_name, None)
+            if v is None:
+                if not fill:
+                    break  # there's no more columns after the missing one
+                v = ""
+            o.append(c_def.to_str(v, trim_values))
+        if not trim_columns and self.extras:
+            o.append(RECORD.join(UNIT.join(s for s in z) for z in self.extras))
+        return RECORD.join(o)
 
 
-def _semi_valid_str(self) -> str:
-    """Does not enforce column-level validity"""
-    return _2bsv_str(self, True, True)
-
-
-def _table_definition_str(cls) -> str:
-    """The opposite of new_table_from_raw_lines
-
-    :return: a string that will generate the RowType
-    """
-    pprint([c.definition_string for c in cls.columns.values()])
-    return (
-        _make_header_str(
-            [
-                cls.original_name,  # name
-                ("X" if cls.allow_extras else "")
-                + ("S" if cls.allow_short else ""),  # options
-                getattr(cls, "comment", None),  # comment
-                getattr(cls, "client", None),  # client
-            ]
-            + cls.extra_headers,
-            RECORD,
-        )
-        + GROUP
-        + RECORD.join([c.definition_string for c in cls.columns.values()])
-    )
+def _repr4table_row(self):
+    """This should be __repr__ for TableRow,
+    but it doesn't work properly when defined within the class directly"""
+    return f"{self.__name__}_row({self.data_dict()})"
 
 
 def new_table_type(
@@ -235,20 +217,17 @@ def new_table_type(
     """
     # prep work
     columns_as_fields: List[Tuple] = []
+    original_name = name
+    name = to_class_name(name)
+
     ns = {  # class attributes
         "__name__": name,
         **ns,
+        "original_name": original_name,
         "allow_short": allow_short,
         "allow_extras": allow_extras,
         "columns": {},
-        "__repr__": _column_repr__,
-        "column_names": _column_names,
-        "num_columns": len(columns),
-        "__post_init__": _post_init4bsv_row,
-        "values": _values4bsv_row,
-        "semi_validated_str": _semi_valid_str,
-        "raw_bsv_str": _literal_str,
-        "table_str": _table_definition_str,
+        "__repr__": _repr4table_row,
     }
     # turn the columns into Dataclass fields
     for c in columns:
@@ -287,7 +266,7 @@ def new_table_from_raw_lines(
     # There clearly has to be a better way to split a string into
     # a list with meaningful order when not all components are present
     tad = {
-        "original_name": "",  # 0
+        "original_name": "",
         "options": "",  # 1
         "comment": None,  # 2
         "client": None,  # 3
@@ -321,7 +300,7 @@ def new_table_from_raw_lines(
 
         columns.append(ColumnDefinition(**c_attrs))
 
-    return new_table_type(table_definition.extract_table_name(), *columns, **tad)
+    return new_table_type(tad["original_name"], *columns, **tad)
 
 
 def raw_line2dataclass(row_type: Type[RowType], data: RawLine, row_index: int = -1):
@@ -385,13 +364,13 @@ def read_file_into_rows(
 
     :param acceptable_errors: a list of types of acceptable error rather than a numeric value guess
     :param buffer: controls how much of the file to read at a times.
-    No need to adjust this under normal circumstances.
+        No need to adjust this under normal circumstances.
     :param direct_iterator: alternate to f
     :param f: the BSV file-like object to read
     :param errors: writable
     :param strictness: stop processing and raise an exception at any error?
     :param into_dicts: Read the file into dicts?  If not, each table generates a
-    subtype of dataclass in which the results are stored.
+        subtype of dataclass in which the results are stored.
     :return: yields either a dict or a dataclass for each row of the input file
     """
 
@@ -421,7 +400,7 @@ def read_file_into_rows(
         # also covers the empty string at the start of reading
         if last_ending in FILE:
             # print("next table!")
-            table_name = line.extract_table_name()
+            table_name = to_class_name(line.content[0])
             if table_name not in tables.keys():  # define a new table
                 # next(rows) is called here and not in new_table() so
                 # that last_ending may be properly set
@@ -436,15 +415,79 @@ def read_file_into_rows(
 
         # read the row into an object (or collect an error)
         o = conversion_function(current_table, line, line.row_index)
-        # handle errors
-        errors.extend(o.errors)
-        for e in o.errors:
-            if e.severity > strictness and not any(
-                isinstance(e, a) for a in acceptable_errors
-            ):
-                raise e
+        if not into_dicts:
+            # handle errors
+            errors.extend(o.errors)
+            for e in o.errors:
+                if e.severity > strictness and not any(
+                    isinstance(e, a) for a in acceptable_errors
+                ):
+                    raise e
         yield o  # congratulations, we've parsed a new row!
         # save the ending for reading the next line
         last_ending = line.ending
 
     return errors
+
+
+def bsv_dict2str(d: Dict[Any, List]) -> str:
+    main_content = RECORD.join(
+        (
+            UNIT.join(i for i in c)
+            for col, c in d.items()
+            if isinstance(col, str) and c is not None
+        )
+    )
+    if not d[None]:
+        return main_content
+    return RECORD.join([main_content] + [UNIT.join(i for i in c) for c in d[None]])
+
+
+def write_from_dicts(f, rows: Iterable[Dict[Any, List]], *, use_n: bool = True):
+    first_row: bool = True
+    for row in rows:
+        if first_row:
+            first_row = False
+        else:
+            f.write(GROUP + "\n" if use_n else "")
+        f.write(bsv_dict2str(row))
+
+
+def write_to_file(
+    f,
+    rows: Iterable[RowType],
+    *,
+    use_n: bool = True,
+    sort: bool = False,
+    fill: bool = True,
+    trim_columns: bool = False,
+    trim_values: bool = False,
+):
+    def w(content):
+        f.write(content + "\n" if use_n else "")
+
+    def wx(content):
+        f.write(content)
+
+    if sort:
+        rows = sorted(rows, key=_type_sort_key)
+    table_list = set()
+    current_table = None
+
+    for row in rows:
+        this_table = type(row)
+        if this_table != current_table:
+            if current_table is not None:
+                w(FILE)
+            current_table = this_table
+            if this_table not in table_list:
+                wx(row.table_str(use_n))
+                table_list.add(this_table)
+            else:
+                wx(this_table.original_name)
+        w(GROUP)
+        wx(row.as_bsv_str(fill, trim_columns, trim_values))
+
+
+def _type_sort_key(t):
+    return hash(type(t))

@@ -43,6 +43,9 @@ LINE: chr = "\n"  # newline?
 TAB: chr = "\t"  # alternate value separator
 
 
+_loading_module = True
+
+
 def to_class_name(s: str) -> str:
     return re.sub(r"\W", "", s.title())
 
@@ -72,22 +75,37 @@ class ColumnDefinition:
         sep: chr = UNIT,
         min_vals: int = 0,
         range_str: str = "",
-        currency_code: str = "XXX",
-        decimal_places: int = 3,
         el: Optional[ErrorList] = None,
         **misc_attrs,
     ):
         self.name = name
+        self.type = None
+
         if isinstance(data_type, str):
-            data_type += "S"
-            data_type = data_type.upper()
-            data_type, data_hint = data_type[0], data_type[1:-1].split()
-            if data_type == "C":
-                currency_code, decimal_places = data_hint[1], int(data_hint[0])
-        self.type = self.DataHints.get(data_type)
-        if self.type is None:
+            # add an S to default to string type for a default
+            (
+                data_type,
+                decimal_places,
+                currency_code,
+            ) = CurrencyValue.unwrap_currency_from_string(data_type + "S", el)
+            data_type = data_type[0]  # remove the S
+        else:  # make the linter happy
+            currency_code, decimal_places = None, None
+
+        if not data_type:
             self.type = StringWrapper
-        self.currency_code, self.currency_precision = currency_code, decimal_places
+        elif data_type == "C":
+            self.type = CurrencyValue.lookup_currency_type(
+                currency_code[:-1], decimal_places  # remove the S
+            )
+        elif isinstance(data_type, type) and issubclass(data_type, CurrencyValue):
+            self.type = data_type
+        elif isinstance(data_type, CurrencyValue):
+            self.type = CurrencyValue.lookup_currency_type(
+                data_type.code, data_type.precision
+            )
+        else:
+            self.type = self.DataHints.get(data_type, StringWrapper)
 
         # override provided min-sep-max if range_str is provided
         if range_str:
@@ -157,7 +175,7 @@ class ColumnDefinition:
         return _make_header_str(
             [
                 self.name,
-                self.type.dh_chr,  # noqa  set with setattr in __init_subclass__
+                self.type.dh_chr,  # noqa  set with setattr in __init_subclass__,
                 self.range_string,
                 getattr(self, "comment", None),
                 getattr(self, "client", None),
@@ -215,8 +233,8 @@ class ColumnDefinition:
 
         return out_vals
 
-    def to_str(self, vals: List) -> str:
-        return self.sep.join(str(v) for v in vals)
+    def to_str(self, vals: List, trim: bool = False) -> str:
+        return self.sep.join([str(v) for v in vals][: self.max if trim else None])
 
     def is_valid(self, vals: List) -> bool:
         return self.validate_length(vals) and self.validate_length(vals)
@@ -384,6 +402,9 @@ for prefix, quant in {
     ColumnTemplate.register_meta_template(prefix, quant)
 
 
+_generic_template_queue = []
+
+
 class BaseValue(abc.ABC):
     tab_separable: bool = True
     space_separable: bool = False
@@ -432,7 +453,11 @@ class BaseValue(abc.ABC):
 
         if short_name:
             cls.short_name = short_name
-            ColumnTemplate.create_templates4type(cls)
+            if _loading_module:
+                # save for later to prevent NameErrors
+                _generic_template_queue.append(cls)
+            else:
+                ColumnTemplate.create_templates4type(cls)
 
 
 class IntWrapper(BaseValue, hint="I", wraps=[int], short_name="Int"):
@@ -633,11 +658,7 @@ class RelativeDatetimeString(
 
         if isinstance(distance, str):
             try:
-                self.distance = int(distance)
-            except ValueError:
-                pass
-            try:
-                self.distance = float(distance)
+                self.distance = _num(distance)
             except ValueError:
                 if ":" in distance and unit == "H":
                     """
@@ -735,9 +756,9 @@ class RelativeDatetimeString(
             return self.as_relativedelta()
         if isinstance(dt, RelativeDatetimeString):
             o = self() + dt()
-        elif isinstance(dt, datetime.datetime) or isinstance(dt, datetime.date):
+        elif isinstance(dt, (datetime.datetime, datetime.date,)):
             o = dt + self()
-        elif isinstance(dt, relativedelta) or isinstance(dt, datetime.timedelta):
+        elif isinstance(dt, (relativedelta, datetime.timedelta,)):
             o = dt + self()
         else:
             raise NotImplementedError(f"Cannot add {dt} with {self}.")
@@ -760,58 +781,85 @@ class RelativeDatetimeString(
         )
 
     def _negate_distance(self, do_abs: bool = False) -> int | float | str:
-        if isinstance(self.distance, float) or isinstance(self.distance, int):
+        if isinstance(self.distance, (float, int,)):
             return abs(self.distance) if do_abs else -self.distance
         # type(self.distance) == str from here on
         if do_abs:
             return "+" + self.distance[1:]
         return ("-" if self.distance[0] == "+" else "+") + self.distance[1:]  # noqa
 
+    def __repr__(self):
+        return f"RDS:{self}"
+
 
 class CurrencyError(ValueTypeError):
     pass
 
 
-class CurrencyValue(BaseValue, hint="C", short_name="Currency"):
+class CurrencyValue(BaseValue, abc.ABC, hint="C", short_name="Currency"):
+    currency_code_collection: Dict[str, Type[CurrencyType]] = {}
+    precision: int = None
+    code: str = "XXX"
+
     def __init__(
         self,
         value,
-        currency: str = None,
-        precision: Optional[int] = None,
         line_num: int = -1,
         el: Optional[ErrorList] = None,
         called_by: Union[ColumnDefinition, CurrencyValue] = None,
+        implicit: bool = True,
         **_kwargs,
     ):
-        changed = True
         self.value = Decimal(value)
         real_decimals = -self.value.as_tuple()[2]
-        if precision is None and called_by is not None:
-            precision = called_by.currency_precision
-        if precision is not None and precision != real_decimals:
+        if self.precision is not None and self.precision != real_decimals:
             add_error2el(
                 CurrencyError(
                     "Incorrect decimal places in currency",
                     value,
-                    f"{real_decimals} decimal places given in a currency with {precision}",
+                    f"{real_decimals} decimal places given in a currency with {self.precision}",
                     line_num,
                 ),
                 el,
             )
-        if currency is None:
-            currency = "XXX" if called_by is None else called_by.currency_code
-        self.currency_code = currency
-        if (
-            called_by
-            and precision == called_by.currency_precision
-            and currency == called_by.currency_code
-        ):
-            changed = False
-        self.currency_precision = real_decimals if precision is None else precision
-        self.changed_from_column = changed
+        self.explicit_units = (
+            not implicit
+            or isinstance(called_by, CurrencyValue)
+            and self.code != called_by.code
+            or isinstance(called_by, ColumnDefinition)
+            and self.code != called_by.type.code
+        )
 
     @staticmethod
+    def lookup_currency_type(
+        currency: str, precision: Optional[int] = None
+    ) -> Type[CurrencyType]:
+        currency = currency.upper().strip()
+        try:
+            return CurrencyValue.currency_code_collection[currency]
+        except KeyError:
+            return type(  # noqa  Otherwise the type checker complains
+                f"currency_{currency}",
+                (CurrencyValue,),
+                {"precision": precision, "code": currency},
+            )
+
+    @classmethod
+    def currency_definition_string(cls) -> str:
+        return ("" if cls.precision is None else f"{cls.precision} ") + f"{cls.code}"
+
+    @property
+    def dh_chr(self) -> str:
+        return f"C {self.currency_definition_string()}"
+
+    def __init_subclass__(cls, **kwargs):
+        # NOTE: do not pass on to super().__init_subclass__ so each new
+        # currency does not pollute the global namespace with generic columns
+        CurrencyValue.currency_code_collection[cls.code] = cls
+
+    @classmethod
     def from_str(
+        cls,
         value: str,
         error_list: Optional[ErrorList] = None,
         line_no: int = -1,
@@ -819,59 +867,52 @@ class CurrencyValue(BaseValue, hint="C", short_name="Currency"):
         *others,
         **extras,
     ):
-        value = value.upper().split()
-        amount = value[0]
-        precision = None
-        currency = None if len(value) < 2 else value[-1]
-        if len(value) > 2:
-            try:
-                precision = int(value[1])
-            except ValueError:
-                add_error2el(
-                    ValueTypeError(
-                        "Undefined currency precision",
-                        value[1],
-                        line_num=line_no,
-                        details=f"{value[1]} is not an integer",
-                    ),
-                    error_list,
+        amount, precision, currency = cls.unwrap_currency_from_string(value, error_list)
+        if currency is None:
+            currency = cls.code
+        currency = CurrencyValue.lookup_currency_type(currency, precision)
+        if (
+            currency.precision is not None
+            and precision is not None
+            and currency.precision != precision
+        ):
+            add_error2el(
+                CurrencyError(
+                    f"Precision mismatch!",
+                    None,
+                    f"{precision} decimal places were specified for a currency"
+                    + f"already defined with {currency.precision}",
+                    line_no,
                 )
-        try:
-            return CurrencyValue(
-                amount,
-                currency,
-                precision,
-                line_num=line_no,
-                called_by=calling_column,
-                el=error_list,
             )
-        except CurrencyError as e:
-            add_error2el(e, error_list)
-            return CurrencyValue(amount, currency, None, True, line_num=line_no)
+        try:
+            return currency(
+                amount, line_num=line_no, called_by=calling_column, el=error_list,
+            )
         except (ValueError, decimal.InvalidOperation) as e:
             add_error2el(
                 ValueTypeError("Cannot convert to currency", value, str(e), line_no),
                 error_list,
             )
-        finally:
-            return " ".join(value)
+        return value
 
     def __str__(self):
-        if not self.changed_from_column:
-            return str(self.value)
-        return f"{self.value} {self.currency_precision} {self.currency_code}"
+        return str(self.value) + (
+            f" {self.currency_definition_string()}" if self.explicit_units else ""
+        )
 
     def __repr__(self):
         return "".join(
             [
-                f"currency_{self.currency_code}",
-                "!" if self.changed_from_column else "",
-                f"({self.value} / {self.currency_precision})",
+                f"currency_{self.code}",
+                "!" if self.explicit_units else "",
+                f"({self.value} / {self.precision})",
             ]
         )
 
+    @classmethod
     def make_currency_column(
-        self,
+        cls,
         name: str,
         max_vals: int = sys.maxsize,
         sep: chr = UNIT,
@@ -884,14 +925,36 @@ class CurrencyValue(BaseValue, hint="C", short_name="Currency"):
             max_vals,
             sep,
             min_vals,
-            currency_code=self.currency_code,
-            decimal_places=self.currency_precision,
+            currency_code=cls.code,
+            decimal_places=cls.precision,
             el=el,
         )
 
+    @staticmethod
+    def unwrap_currency_from_string(
+        value: str, error_list: Optional[ErrorList] = None
+    ) -> Tuple[str, Optional[int], Optional[str]]:
+        value = value.upper().split()
+        amount = value[0]
+        precision = None
+        if len(value) > 2:
+            try:
+                precision = int(value[1])
+            except ValueError:
+                add_error2el(
+                    ValueTypeError(
+                        "Undefined currency precision",
+                        value[1],
+                        details=f"{value[1]} is not an integer",
+                    ),
+                    error_list,
+                )
+        currency_code = None if len(value) < 2 else value[-1]
+        return amount, precision, currency_code
+
 
 class FractionWrapper(BaseValue, hint="R", wraps=[Fraction], short_name="Fraction"):
-    """Fractions are composed of two integers separated by /"""
+    """Fractions are composed of two numbers separated by /"""
 
     @staticmethod
     def from_str(
@@ -902,10 +965,21 @@ class FractionWrapper(BaseValue, hint="R", wraps=[Fraction], short_name="Fractio
         **extras,
     ):
         try:
+            """
             # handle the parsing from string via int() and Fraction()
             # Do not directly return Fraction(value) in case of spaces
             # surrounding the slash
-            return Fraction(*[int(v) for v in value.split("/")])
+            
+            Unlike the Fraction() constructor, this handles decimal values
+            better than their raw float conversion and can deal with fractions
+            where neither the numerator nor denominator is an integer
+            """
+            numerator, denominator, *problems = value.split("/")
+            if problems:
+                raise ValueError("Too many slashes in the fraction")
+            return Fraction(
+                Fraction(Decimal(numerator)), Fraction(Decimal(denominator)),
+            )
         except ValueError:
             add_error2el(
                 InputError(
@@ -971,3 +1045,17 @@ class TimeWrapper(BaseValue, hint="T", wraps=[datetime.time], short_name="Time")
 
 ColumnType = TypeVar("ColumnType", bound=ColumnDefinition)
 ValueType = TypeVar("ValueType", bound=BaseValue)
+CurrencyType = TypeVar("CurrencyType", bound=CurrencyValue)
+
+
+def _num(x: str) -> int | float:
+    try:
+        return int(x)
+    except ValueError:
+        return float(x)
+
+
+# process the queue from BaseValue.__init_subclass__
+for cls in _generic_template_queue:
+    ColumnTemplate.create_templates4type(cls)
+_loading_module = False  # you don't need to worry about that anymore
