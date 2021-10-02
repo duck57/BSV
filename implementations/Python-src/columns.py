@@ -76,10 +76,16 @@ class ColumnDefinition:
         min_vals: int = 0,
         range_str: str = "",
         el: Optional[ErrorList] = None,
+        doc: str = None,
         **misc_attrs,
     ):
+        # set misc_attrs here so they don't override more useful parts of the column
+        for a, v in misc_attrs.items():
+            setattr(self, a, v)
         self.name = name
         self.type = None
+        if doc:
+            self.__doc__ = doc
 
         if isinstance(data_type, str):
             (
@@ -161,9 +167,6 @@ class ColumnDefinition:
         self.min = min_vals
         self.sep = sep
 
-        for a, v in misc_attrs.items():
-            self.__setattr__(a, v)
-
     @property
     def range_string(self) -> str:
         min_st = "" if self.min < 1 else str(self.min)
@@ -178,7 +181,7 @@ class ColumnDefinition:
         return _make_header_str(
             [
                 self.name,
-                self.type.dh_chr,  # noqa  set with setattr in __init_subclass__,
+                self.type.dh_chr,
                 self.range_string,
                 getattr(self, "comment", None),
                 getattr(self, "client", None),
@@ -189,6 +192,7 @@ class ColumnDefinition:
 
     @property
     def dataclass_field(self) -> dataclasses.Field:
+        """For use in creating TableRow subclasses"""
         return dataclasses.field(
             default=None,
             metadata={
@@ -205,6 +209,8 @@ class ColumnDefinition:
     ) -> Optional[List]:
         """Converts the input string into a list of values
 
+        An alternate name for this could be from_string()
+
         :param in_vals: the value(s) to convert
         :param el: optional error list for error collection
         :param line_num: line number for debugging and error messages
@@ -212,12 +218,13 @@ class ColumnDefinition:
         """
         if in_vals is None:
             return in_vals
-        if isinstance(in_vals, str):
-            in_vals = [v for v in in_vals.split(self.sep) if v]
         out_vals = [
-            self.type.from_str(v, el, line_num, calling_column=self) for v in in_vals
+            self.type.from_str(v, el, line_num)
+            for v in (in_vals.split(self.sep) if isinstance(in_vals, str) else in_vals)
+            if v  # handle None types, empty lists, and missing / null values
         ]
 
+        # handle length errors
         e_st = f"{len(out_vals)} values provided for a column which expects "
         if len(out_vals) < self.min:
             add_error2el(
@@ -251,6 +258,28 @@ class ColumnDefinition:
         return self.min <= len(vals) <= self.max
 
 
+def column_from_BSV_string(
+    string: str, el: Optional[ErrorList] = None
+) -> ColumnDefinition:
+    """Converts in input string into a ColumnDefinition"""
+    c_attrs = {
+        "name": "",  # 0
+        "data_type": "",  # 1
+        "range_str": "",  # 2
+        "comment": None,  # 3
+        "client": None,  # 4
+        "extra_headers": [],  # 5
+    }
+    col_attrs: List[str] = string.split(UNIT)
+    for attr, value in zip(c_attrs.keys(), col_attrs):
+        if attr == "extra_headers":
+            break
+        c_attrs[attr] = value
+    c_attrs["extra_headers"] = col_attrs[5:]
+    c_attrs["el"] = el
+    return ColumnDefinition(**c_attrs)
+
+
 class ColumnTemplate(ColumnDefinition):
     """
     Template for other column definitions.
@@ -270,6 +299,8 @@ class ColumnTemplate(ColumnDefinition):
         self, column_name: str, currency_string: str = "", el=None, **kwargs
     ) -> ColumnDefinition:
         """
+        Creates a new ColumnDefinition
+
         :param column_name: the name of the new ColumnDefinition to return
         :param currency_string: the "2 USD" precision and currency code specification
             to be used in currency columns
@@ -376,9 +407,13 @@ class ColumnTemplate(ColumnDefinition):
             if max_ is not None:
                 args["max_vals"] = max_
                 if max_ != min_:
-                    n += f" and {max_}"
+                    if min_ is not None:
+                        n += " and"
+                    n += f" {max_}"
             n += f" {type_ if isinstance(type_, str) else type_.__name__}"
-            return ColumnTemplate(n, **args)
+            return ColumnTemplate(
+                n, **args, doc=f"Creates a new column for {n}(s) when called."
+            )
 
         if _type_:  # template for a concrete type
             return create_generic_template(_type_, name_stem)
@@ -394,6 +429,11 @@ class ColumnTemplate(ColumnDefinition):
 
     @classmethod
     def at_least(cls, min_: int, type_=None):
+        """Expected use case is at_least(1)
+
+        When using at_least(7), take a moment of consider if
+        six exactly(1) columns plus one at_least(1) column
+        may be more suitable for your use case"""
         return cls._meta_template("at least", min_, None, type_)
 
     @classmethod
@@ -406,7 +446,10 @@ class ColumnTemplate(ColumnDefinition):
 
     @classmethod
     def exactly(cls, number: int, type_=None):
-        """Expected use case is exactly(1)"""
+        """Expected use case is exactly(1)
+
+        When using exactly(4), consider whether four exactly(1)
+        columns may be more appropriate."""
         return cls._meta_template("exactly", number, number, type_)
 
     @classmethod
@@ -432,6 +475,7 @@ for prefix, quant in {
     "SingleOptional": ColumnTemplate.at_most(1),
     "AtMostOne": ColumnTemplate.at_most(1),
     "ExactlyOne": ColumnTemplate.exactly(1),
+    "SingleRequired": ColumnTemplate.exactly(1),
     "Unlimited": ColumnTemplate.unlimited(),
 }.items():
     ColumnTemplate.register_meta_template(prefix, quant)
@@ -441,6 +485,8 @@ _generic_template_queue = []
 
 
 class BaseValue(abc.ABC):
+    """ABC to define the common attributes of ValueTypes and their wrappers"""
+
     tab_separable: bool = True
     space_separable: bool = False
     wraps: Type = None
@@ -456,7 +502,17 @@ class BaseValue(abc.ABC):
         *others,
         **extras,
     ):
-        ...
+        """Converts a value into the type from a string.  Will raise errors if
+        it cannot be added to error_list.
+
+        :param value: The value to transform
+        :param error_list: if provided, errors go here rather than raising up the stack
+        :param line_num: for more helpful error messages
+        :param others: for method signature compatibility
+        :param extras: for method signature compatibility
+        :return: The transformed value or the raw input string if there are errors
+        """
+        pass
 
     # should some of this be done with a metaclass instead?
     # make wraps, short_name, and hint class attributes that are parsed
@@ -496,6 +552,17 @@ class BaseValue(abc.ABC):
 
 
 class IntWrapper(BaseValue, hint="I", wraps=[int], short_name="Int"):
+    """Wrapper for integers.
+
+    Will return a float rather than error out entirely during conversion.
+    However, an error is still added to the list for floats.
+
+    >>> IntWrapper.from_str("2.63")
+    2.63
+    >>> IntWrapper.from_str("3.0")
+    3
+    """
+
     space_separable = True
 
     @staticmethod
@@ -531,6 +598,8 @@ class IntWrapper(BaseValue, hint="I", wraps=[int], short_name="Int"):
 
 
 class FloatWrapper(BaseValue, hint="D", wraps=[float], short_name="Float"):
+    """Wraps floats."""
+
     space_separable = True
 
     @staticmethod
@@ -557,6 +626,8 @@ class FloatWrapper(BaseValue, hint="D", wraps=[float], short_name="Float"):
 
 
 class StringWrapper(BaseValue, hint="S", wraps=[str], short_name="String"):
+    """A do-nothing wrapper for strings"""
+
     tab_separable = False
 
     @staticmethod
@@ -573,6 +644,13 @@ class StringWrapper(BaseValue, hint="S", wraps=[str], short_name="String"):
 class RelativeDatetimeString(
     BaseValue, hint="E", short_name="RelativeDate", wraps=[relativedelta]
 ):
+    """
+    Strings which represent times such as "three weeks ago" = W-3
+
+    Full specification of these strings can be found in the BSV specification
+    in the top-level README
+    """
+
     space_separable = True
     unit_expansions = {
         "H": "hours",
@@ -582,7 +660,7 @@ class RelativeDatetimeString(
         "Y": "years",
         "S": "seconds",
     }
-    DAY_LENGTH = 86400
+    DAY_LENGTH = 86_400
     unit_lookups = {name: sym for sym, name in unit_expansions.items()}
     to_seconds = {
         "years": DAY_LENGTH * 365.24,
@@ -601,6 +679,12 @@ class RelativeDatetimeString(
         distance: int | str | float | relativedelta = 0,
         is_abs: bool = False,
     ):
+        """Creates a new instance **after** any input string has been processed
+        and split into its respective unit and distance components
+
+        Using relativedelta to seed the distance makes a best-effort attempt to
+        combine all the relativedelta information into a single number to combine
+        with the best-chosen unit character."""
         # preliminary sanity-checking
         unit = unit.upper().strip()
         if not distance and not unit:
@@ -833,6 +917,11 @@ class CurrencyError(ValueTypeError):
 
 
 class CurrencyValue(BaseValue, abc.ABC, hint="C", short_name="Currency"):
+    """Like a fancy wrapper for the Decimal class
+
+    This is actually a superclass for currency classes: each unique currency
+    code generates its own specific class during runtime."""
+
     currency_code_collection: Dict[str, Type[CurrencyType]] = {}
     precision: int = None
     code: str = "XXX"
@@ -846,6 +935,11 @@ class CurrencyValue(BaseValue, abc.ABC, hint="C", short_name="Currency"):
         implicit: bool = True,
         **_kwargs,
     ):
+        """Creates the instance *after* string processing.
+
+        The implicit param controls whether the full code is printed
+        during __str__ or whether it should be assumed from the column header
+        or other context [in which case it only prints the numeric value]."""
         self.value = Decimal(value)
         real_decimals = -self.value.as_tuple()[2]
         if self.precision is not None and self.precision != real_decimals:
@@ -960,12 +1054,15 @@ class CurrencyValue(BaseValue, abc.ABC, hint="C", short_name="Currency"):
         min_vals: int = -1,
         el: Optional[ErrorList] = None,
     ) -> ColumnDefinition:
+        """Creates a column definition instance based on the specific
+        currency represented by cls."""
         return ColumnDefinition(name, cls, max_vals, sep, min_vals, el=el,)
 
     @staticmethod
     def unwrap_currency_from_string(
         value: str, error_list: Optional[ErrorList] = None
     ) -> Tuple[str, Optional[int], Optional[str]]:
+        """A fancy tuple unpacker"""
         value = value.upper().split()
         amount = value[0]
         precision = None
@@ -1009,9 +1106,7 @@ class FractionWrapper(BaseValue, hint="R", wraps=[Fraction], short_name="Fractio
             numerator, denominator, *problems = value.split("/")
             if problems:
                 raise ValueError("Too many slashes in the fraction")
-            return Fraction(
-                Fraction(Decimal(numerator)), Fraction(Decimal(denominator)),
-            )
+            return Fraction(Fraction(numerator), Fraction(denominator),)
         except ValueError:
             add_error2el(
                 InputError(
@@ -1022,12 +1117,14 @@ class FractionWrapper(BaseValue, hint="R", wraps=[Fraction], short_name="Fractio
                 ),
                 error_list,
             )
-            return "/".join(value)
+            return value
 
 
 class DateWrapper(
     BaseValue, hint="D", wraps=[datetime.datetime, datetime.date], short_name="DateT"
 ):
+    """A wrapper for a date or a datetime."""
+
     @staticmethod
     def from_str(
         value: str,
@@ -1038,7 +1135,7 @@ class DateWrapper(
     ):
         try:
             parsed_value = parse_date(value)
-        except ValueError:
+        except (ValueError, ParserError):
             add_error2el(
                 ValueTypeError(
                     "Invalid date(time)",
@@ -1055,6 +1152,8 @@ class DateWrapper(
 
 
 class TimeWrapper(BaseValue, hint="T", wraps=[datetime.time], short_name="Time"):
+    """This wrapper is only for times (no dates)"""
+
     @staticmethod
     def from_str(
         value: str,
@@ -1065,7 +1164,7 @@ class TimeWrapper(BaseValue, hint="T", wraps=[datetime.time], short_name="Time")
     ):
         try:
             return parse_date(value).time()
-        except ValueError:
+        except (ValueError, ParserError):
             add_error2el(
                 ValueTypeError(
                     "Cannot parse time", value, f"{value} is not a valid time", line_num
@@ -1081,6 +1180,10 @@ CurrencyType = TypeVar("CurrencyType", bound=CurrencyValue)
 
 
 def _num(x: str) -> int | float:
+    """Converts x into a number.
+
+    If x cannot be converted into an int or float,
+    a ValueError is raised."""
     try:
         return int(x)
     except ValueError:

@@ -1,6 +1,6 @@
 # Better Separated Values
 
-An improvement to CSV.  Current version = 0.0.4 ^ 0/1
+An improvement to CSV.  Current version = 0.0.4 ^ 1/0
 
 ## Inspiration
 
